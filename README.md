@@ -12,9 +12,8 @@ This browser userscript can be used when you enter your user page on the website
 It can export csv, json and html files.<br>
 The more tags you choose for exporting, the longer is gonna take.<br>
 > [!WARNING]
-> If you are being rate-limited by a website, increase the Page Request Rate in the ⚙️ menu.
-> For example: 500–1000 ms, 1 page per request will most likely be safe, but much slower. 
-> <br>
+> If you are being rate-limited by a website, increase the Page Request Rate in the ⚙️ menu.<br>
+> For example: 500–1000 ms, 1 page per request will most likely be safe, but much slower. <br>
 
 # List of Features:
 - Supports: Backloggd, GameFAQs, HLTB, IGDB, MobyGames and VNDB
