@@ -1,22 +1,28 @@
 // ==UserScript==
 // @name         Game Library Exporter
 // @namespace    https://backloggd.com/
-// @version      1.1.1
-// @description  Export game libraries from supported websites as HTML, CSV, and JSON.
+// @version      1.2.0
+// @description  Export your game libraries from supported websites as HTML, CSV, and JSON.
 // @author       TrainStream
 // Written with Codex and Claude assistance.
 // @license https://github.com/TrainStream/GameLibraryExporter/blob/main/LICENSE
 // @match        https://backloggd.com/*
 // @match        https://www.backloggd.com/*
-// @match        https://mobygames.com/user/*
-// @match        https://www.mobygames.com/user/*
+// @match        https://mobygames.com/user*
+// @match        https://www.mobygames.com/user*
 // @match        https://howlongtobeat.com/user/*
 // @match        https://www.howlongtobeat.com/user/*
+// @match        https://vndb.org/u*/ulist*
+// @match        https://www.vndb.org/u*/ulist*
+// @match        https://gamefaqs.gamespot.com/mygames*
+// @match        https://www.igdb.com/users*
 // @grant        GM_xmlhttpRequest
 // @grant        GM.xmlHttpRequest
 // @connect      github.com
 // @connect      images.igdb.com
+// @connect      www.igdb.com
 // @connect      howlongtobeat.com
+// @connect      vndb.org
 // @updateURL    https://github.com/TrainStream/GameLibraryExporter/raw/refs/heads/main/GameLibraryExporter.meta.js
 // @downloadURL  https://github.com/TrainStream/GameLibraryExporter/raw/refs/heads/main/GameLibraryExporter.user.js
 // ==/UserScript==
@@ -25,6 +31,40 @@
   'use strict';
 
   const ENABLE_EXPORTER_DIAGNOSTICS = true;
+  const EXPORTER_ID = 'bgd-exporter-root';
+  const EXPORTER_VERSION = '1.2.0';
+  const EXPORTER_RELEASES_URL = 'https://github.com/TrainStream/GameLibraryExporter/releases';
+  // Maximum number of game detail pages fetched in parallel when resolving
+  // missing release dates. Increase cautiously; higher values may trigger
+  // rate-limiting on Backloggd's servers.
+  const BACKLOGGD_DETAIL_FETCH_CONCURRENCY = 3;
+  const MOBYGAMES_DETAIL_FETCH_CONCURRENCY = 1;
+  const HLTB_DETAIL_FETCH_CONCURRENCY = 6;
+  const VNDB_DETAIL_FETCH_CONCURRENCY = 2;
+  const GAMEFAQS_DETAIL_FETCH_CONCURRENCY = 6;
+  const IGDB_RENDERED_PAGE_CONCURRENCY = 6;
+  // Default delay range between requests, in milliseconds. Users can override
+  // these values in the Status Pill Configuration menu. Each request uses a
+  // random whole-number delay from MIN through MAX; equal values are fixed.
+  const BACKLOGGD_FILTER_REQUEST_DELAY_MIN_MS = 50;
+  const BACKLOGGD_FILTER_REQUEST_DELAY_MAX_MS = 100;
+  const MOBYGAMES_REQUEST_DELAY_MIN_MS = 50;
+  const MOBYGAMES_REQUEST_DELAY_MAX_MS = 100;
+  const HLTB_REQUEST_DELAY_MIN_MS = 50;
+  const HLTB_REQUEST_DELAY_MAX_MS = 100;
+  const VNDB_REQUEST_DELAY_MIN_MS = 50;
+  const VNDB_REQUEST_DELAY_MAX_MS = 100;
+  const GAMEFAQS_REQUEST_DELAY_MIN_MS = 50;
+  const GAMEFAQS_REQUEST_DELAY_MAX_MS = 100;
+  const IGDB_REQUEST_DELAY_MIN_MS = 50;
+  const IGDB_REQUEST_DELAY_MAX_MS = 100;
+  const REQUEST_DELAY_STORAGE_KEY_PREFIX = 'bgdRequestDelay:';
+  const BACKLOGGD_FILTER_RETRY_DELAYS_MS = [5000, 15000, 30000, 60000];
+  const BACKLOGGD_HTML_CACHE_LIMIT = 1000;
+  const backloggdHtmlResponseCache = new Map();
+  const backloggdHtmlRequestCache = new Map();
+  const backloggdGameDetailCache = new Map();
+  const requestSlotTimes = new Map();
 
   // ---------------------------------------------------------------------------
   // Section map
@@ -59,6 +99,11 @@
     backlog: 2,
     wishlist: 3,
   };
+  const NATURAL_COLLATOR = new Intl.Collator(undefined, {
+    sensitivity: 'base',
+    numeric: true,
+  });
+  const compareNatural = (a, b) => NATURAL_COLLATOR.compare(String(a || ''), String(b || ''));
 
   const MONTH_NAME_RE = 'Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t|tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?';
   const FULL_RELEASE_DATE_RE = new RegExp(`\\b(?:${MONTH_NAME_RE})\\.?\\s+\\d{1,2},\\s+\\d{4}\\b`, 'i');
@@ -255,6 +300,286 @@
     'Word construction': '#4773c9',
   };
   const MOBYGAMES_GENRE_LABELS = Object.keys(MOBYGAMES_GENRE_COLORS);
+  const IGDB_GENRE_LABELS = `4X
+Action
+Adventure
+Arcade
+Business
+Card & Board Game
+Comedy
+Drama
+Educational
+Erotic
+Fantasy
+Fighting
+Hack and slash/Beat 'em up
+Historical
+Horror
+Indie
+Kids
+MOBA
+Music
+Mystery
+Non-fiction
+Open world
+Party
+Pinball
+Platform
+Point-and-click
+Puzzle
+Quiz/Trivia
+Racing
+Real Time Strategy (RTS)
+Role-playing (RPG)
+Romance
+Sandbox
+Science fiction
+Shooter
+Simulator
+Sport
+Stealth
+Strategy
+Survival
+Tactical
+Thriller
+Turn-based strategy (TBS)
+Visual Novel
+Warfare`.split('\n');
+  const IGDB_PLATFORM_LABELS = `1292 Advanced Programmable Video System
+3DO Interactive Multiplayer
+64DD
+Acorn Archimedes
+Acorn Electron
+Advanced Pico Beena
+AirConsole
+Amazon Fire TV
+Amiga
+Amiga CD32
+Amstrad CPC
+Amstrad GX4000
+Amstrad PCW
+Android
+Apple II
+Apple IIGS
+Apple Pippin
+Arcade
+Arcadia 2001
+Arduboy
+Atari 2600
+Atari 5200
+Atari 7800
+Atari 8-bit
+Atari Jaguar
+Atari Jaguar CD
+Atari Lynx
+Atari ST/STE
+AY-3-8500
+AY-3-8603
+AY-3-8605
+AY-3-8606
+AY-3-8607
+AY-3-8610
+AY-3-8710
+AY-3-8760
+Bally Astrocade
+BBC Microcomputer System
+BlackBerry OS
+Blu-ray Player
+Call-A-Computer time-shared mainframe computer system
+Casio Loopy
+CDC Cyber 70
+ColecoVision
+Commodore 16
+Commodore C64/128/MAX
+Commodore CDTV
+Commodore PET
+Commodore Plus/4
+Commodore VIC-20
+Digiblast
+Donner Model 30
+DOS
+Dragon 32/64
+Dreamcast
+DVD Player
+e-Reader / Card-e Reader
+EDSAC
+Elektor TV Games Computer
+Epoch Cassette Vision
+Epoch Super Cassette Vision
+Evercade
+Exidy Sorcerer
+Fairchild Channel F
+Family Computer
+Family Computer Disk System
+Ferranti Nimrod Computer
+FM Towns
+FM-7
+Gamate
+Game & Watch
+Game Boy
+Game Boy Advance
+Game Boy Color
+Game.com
+Gear VR
+Gizmondo
+Google Stadia
+Handheld Electronic LCD
+HP 2100
+HP 3000
+Hyper Neo Geo 64
+HyperScan
+Intellivision
+Intellivision Amico
+iOS
+LaserActive
+Leapster
+Leapster Explorer/LeadPad Explorer
+LeapTV
+Legacy Computer
+Legacy Mobile Device
+Linux
+Mac
+Mega Duck/Cougar Boy
+Meta Quest 2
+Meta Quest 3
+Microvision
+MSX
+MSX2
+N-Gage
+NEC PC-6000 Series
+Neo Geo AES
+Neo Geo CD
+Neo Geo MVS
+Neo Geo Pocket
+Neo Geo Pocket Color
+New Nintendo 3DS
+Nintendo 3DS
+Nintendo 64
+Nintendo DS
+Nintendo DSi
+Nintendo Entertainment System
+Nintendo GameCube
+Nintendo Switch
+Nintendo Switch 2
+Nuon
+Oculus Go
+Oculus Quest
+Oculus Rift
+Odyssey
+Odyssey 2 / Videopac G7000
+OnLive Game System
+OOParts
+Ouya
+Palm OS
+Panasonic Jungle
+Panasonic M2
+PC (Microsoft Windows)
+PC Engine SuperGrafx
+PC-50X Family
+PC-8800 Series
+PC-9800 Series
+PC-FX
+PDP-1
+PDP-10
+PDP-11
+PDP-8
+Philips CD-i
+PLATO
+Playdate
+Playdia
+PlayStation
+PlayStation 2
+PlayStation 3
+PlayStation 4
+PlayStation 5
+PlayStation Portable
+PlayStation Vita
+PlayStation VR
+PlayStation VR2
+Plug & Play
+PocketStation
+Pokémon mini
+Polymega
+R-Zone
+Satellaview
+SDS Sigma 7
+Sega 32X
+Sega CD
+Sega CD 32X
+Sega Game Gear
+Sega Master System/Mark III
+Sega Mega Drive/Genesis
+Sega Pico
+Sega Saturn
+SG-1000
+Sharp MZ-2200
+Sharp X1
+Sharp X68000
+Sinclair QL
+Sinclair ZX81
+Sol-20
+Super A'Can
+Super Famicom
+Super NES CD-ROM System
+Super Nintendo Entertainment System
+SwanCrystal
+Tapwave Zodiac
+Tatung Einstein
+Terebikko / See 'n Say Video Phone
+Texas Instruments TI-99
+Thomson MO5
+Tomy Tutor / Pyuta / Grandstand Tutor
+TRS-80
+TRS-80 Color Computer
+TurboGrafx-16/PC Engine
+Turbografx-16/PC Engine CD
+Uzebox
+V.Smile
+VC 4000
+Vectrex
+Virtual Boy
+Virtual Console
+visionOS
+Visual Memory Unit / Visual Memory System
+Watara/QuickShot Supervision
+Web browser
+Wii
+Wii U
+Windows Mobile
+Windows Phone
+WonderSwan
+WonderSwan Color
+Xbox
+Xbox 360
+Xbox One
+Xbox Series X|S
+Zeebo
+ZX Spectrum`.split('\n');
+  const GAMEFAQS_PLATFORM_LABELS = [
+    '3DO', '3DS', 'Acorn Archimedes', 'Action Max', 'Adventurevision', 'Amico', 'Amiga', 'Amiga CD32',
+    'Amazon Fire TV', 'Android', 'APF-*1000/IM', 'Apple II', 'Arcade Games', 'Arcadia 2001', 'Astrocade',
+    'Atari 2600', 'Atari 5200', 'Atari 7800', 'Atari 8-bit', 'Atari ST', 'Bandai Pippin', 'Bandai RX-78',
+    'BBC Micro', 'BBS Door', 'Beena', 'BlackBerry', 'Board / Card', 'Cassette Vision', 'Casio Loopy',
+    'Casio PV-1000', 'CD-I', 'Channel F', 'Coleco Telstar Arcade', 'Colecovision', 'Commodore 64',
+    'Commodore PET', 'CPS Changer', 'CreatiVision', 'Dedicated Console', 'Dreamcast', 'DS', 'DVD Player',
+    'EACA Colour Genie 2000', 'e-Reader', 'Evercade', 'Famicom Disk System', 'Flash', 'FM Towns', 'FM-7',
+    'Game Boy', 'Game Boy Advance', 'Game Boy Color', 'Game Wave', 'Game.com', 'GameCube', 'GameGear',
+    'Genesis', 'Gizmondo', 'GP32', 'HyperScan', 'Intellivision', 'Interton VC4000', 'iOS (iPhone/iPad)',
+    'Jaguar', 'Jaguar CD', 'LaserActive', 'Linux', 'Lynx', 'Macintosh', 'Mattel Aquarius', 'Mega Duck',
+    'Meta Quest', 'Microvision', 'Mobile', 'MSX', 'My Vision', 'N-Gage', 'NEC PC88', 'NEC PC98', 'Neo Geo',
+    'Neo Geo CD', 'Neo Geo Pocket', 'Neo Geo Pocket Color', 'NES', 'Nex Playground', 'Nintendo 64',
+    'Nintendo 64DD', 'Nintendo Switch', 'Nintendo Switch 2', 'Nuon', 'Oculus Go', 'Odyssey', 'Odyssey²',
+    'Online/Browser', 'Oric 1/Atmos', 'OS/2', 'Ouya', 'Palm OS Classic', 'Palm webOS', 'PasoGo', 'PC',
+    'PC-FX', 'Pinball', 'Playdate', 'Playdia', 'PlayStation', 'PlayStation 2', 'PlayStation 3',
+    'PlayStation 4', 'PlayStation 5', 'PlayStation Vita', 'Pokemon Mini', 'PSP', 'RCA Studio II',
+    'Redemption', 'Roblox', 'SAM Coupe', 'Saturn', 'Sega 32X', 'Sega CD', 'Sega Master System',
+    'Sega Pico', 'SG-1000', 'Sharp X1', 'Sharp X68000', 'Sinclair ZX81/Spectrum', 'Sord M5', 'Stadia',
+    "Super A'Can", 'Super Cassette Vision', 'Super Nintendo', 'Super Vision 8000', 'SuperVision',
+    'Tandy Color Computer', 'TI-99/4A', 'Tomy Tutor', 'Turbo CD', 'TurboGrafx-16', 'TV Boy', 'Vectrex',
+    'VIC-20', 'View-Master Interactive Vision', 'Virtual Boy', 'Wii', 'Wii U', 'Windows Mobile',
+    'WonderSwan', 'WonderSwan Color', 'XavixPORT', 'Xbox', 'Xbox 360', 'Xbox One', 'Xbox Series X',
+    'Zeebo', 'Zodiac',
+  ];
 
   const GENRE_EMOJIS = {
     'Adventure':    '\u{1f5dd}\ufe0f',
@@ -920,17 +1245,212 @@ ZX81`
     .map(label => label.trim())
     .filter(Boolean);
 
-  const EXPORTER_ID = 'bgd-exporter-root';
-  const EXPORTER_VERSION = '1.1.1';
-  const EXPORTER_RELEASES_URL = 'https://github.com/TrainStream/GameLibraryExporter/releases';
-  // Maximum number of game detail pages fetched in parallel when resolving
-  // missing release dates.  Increase cautiously - higher values may trigger
-  // rate-limiting on Backloggd's servers.
-  const DETAIL_FETCH_CONCURRENCY = 3;
+  function storageGet(key, fallback = null) {
+    try {
+      const value = localStorage.getItem(key);
+      return value === null ? fallback : value;
+    } catch (_) {
+      return fallback;
+    }
+  }
+
+  function storageSet(key, value) {
+    try {
+      localStorage.setItem(key, value);
+      return localStorage.getItem(key) === String(value);
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function storageRemove(key) {
+    try {
+      localStorage.removeItem(key);
+      return localStorage.getItem(key) === null;
+    } catch (_) {
+      return storageSet(key, '');
+    }
+  }
+
+  function getSourceRequestDefaults(sourceId) {
+    const concurrencyBySource = {
+      backloggd: BACKLOGGD_DETAIL_FETCH_CONCURRENCY,
+      mobygames: MOBYGAMES_DETAIL_FETCH_CONCURRENCY,
+      howlongtobeat: HLTB_DETAIL_FETCH_CONCURRENCY,
+      vndb: VNDB_DETAIL_FETCH_CONCURRENCY,
+      gamefaqs: GAMEFAQS_DETAIL_FETCH_CONCURRENCY,
+      igdb: IGDB_RENDERED_PAGE_CONCURRENCY,
+    };
+    return {
+      minMs: 50,
+      maxMs: 100,
+      concurrency: concurrencyBySource[sourceId] || 1,
+    };
+  }
+
+  function normalizeRequestDelaySettings(settings, fallbackMinMs = 50, fallbackMaxMs = 100, fallbackConcurrency = 1) {
+    const normalize = value => Math.min(99999, Math.max(0, Math.round(Number(value) || 0)));
+    const normalizeConcurrency = value => Math.min(99, Math.max(1, Math.round(Number(value) || 1)));
+    const fallbackMin = normalize(fallbackMinMs);
+    const fallbackMax = normalize(fallbackMaxMs);
+    const rawMin = settings && settings.minMs != null ? normalize(settings.minMs) : fallbackMin;
+    const rawMax = settings && settings.maxMs != null ? normalize(settings.maxMs) : fallbackMax;
+    const minMs = Math.min(rawMin, rawMax);
+    const maxMs = Math.max(rawMin, rawMax);
+    const concurrency = settings && settings.concurrency != null
+      ? normalizeConcurrency(settings.concurrency)
+      : normalizeConcurrency(fallbackConcurrency);
+    return { minMs, maxMs, concurrency };
+  }
+
+  function getRequestDelayStorageKey(sourceId) {
+    return `${REQUEST_DELAY_STORAGE_KEY_PREFIX}${String(sourceId || DEFAULT_SOURCE_ID)}`;
+  }
+
+  function loadRequestDelaySettings(sourceId, fallbackMinMs = 50, fallbackMaxMs = 100, fallbackConcurrency = null) {
+    const sourceDefaults = getSourceRequestDefaults(sourceId);
+    const concurrencyDefault = fallbackConcurrency == null ? sourceDefaults.concurrency : fallbackConcurrency;
+    try {
+      const stored = JSON.parse(storageGet(getRequestDelayStorageKey(sourceId), '') || 'null');
+      return normalizeRequestDelaySettings(stored, fallbackMinMs, fallbackMaxMs, concurrencyDefault);
+    } catch (_) {
+      return normalizeRequestDelaySettings(null, fallbackMinMs, fallbackMaxMs, concurrencyDefault);
+    }
+  }
+
+  function saveRequestDelaySettings(sourceId, settings) {
+    const defaults = getSourceRequestDefaults(sourceId);
+    const normalized = normalizeRequestDelaySettings(settings, defaults.minMs, defaults.maxMs, defaults.concurrency);
+    storageSet(getRequestDelayStorageKey(sourceId), JSON.stringify(normalized));
+    return normalized;
+  }
+
+  function getDocumentMaxPage(doc, baseUrl = location.origin) {
+    let max = 1;
+    for (const anchor of doc.querySelectorAll('a[href*="page="]')) {
+      try {
+        const page = Number(new URL(anchor.getAttribute('href'), baseUrl).searchParams.get('page'));
+        if (Number.isFinite(page)) max = Math.max(max, page);
+      } catch (_) {}
+    }
+    return max;
+  }
+
+  async function requestHtmlResponse(url, {
+    credentials = isBackloggdHost() ? 'include' : 'same-origin',
+    signal,
+    headers = {},
+  } = {}) {
+    const response = await fetch(url, {
+      credentials,
+      signal,
+      headers: {
+        Accept: 'text/html,application/xhtml+xml',
+        ...headers,
+      },
+    });
+    if (!response.ok) {
+      const error = new Error(`${response.status} ${response.statusText} for ${url}`);
+      error.status = response.status;
+      throw error;
+    }
+    return response.text();
+  }
 
   function getBackloggdUserSlug() {
     const match = location.pathname.match(/^\/u\/([^/?#]+)/i);
     return match ? decodeURIComponent(match[1]) : '';
+  }
+
+  function isBackloggdListsTarget(pageUrl = location.href) {
+    try {
+      return /^\/u\/[^/?#]+\/lists?(?:\/|$)/i.test(new URL(pageUrl, location.origin).pathname);
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function makeCanonicalStatus({ id = '', label = '', color = '#7dd3fc' } = {}) {
+    const normalizedId = String(id || '').trim();
+    const normalizedLabel = String(label || normalizedId || 'Status Pill').trim();
+    return {
+      id: normalizedId,
+      label: normalizedLabel,
+      color: String(color || '#7dd3fc'),
+    };
+  }
+
+  function canonicalStatusFromPill(pill, fallbackLabel = '') {
+    return makeCanonicalStatus({
+      id: pill && pill.id,
+      label: pill && pill.label || fallbackLabel,
+      color: pill && pill.color,
+    });
+  }
+
+  function buildCanonicalStatusMaps(config) {
+    const labels = {};
+    const colors = {};
+    const priority = {};
+    let index = 0;
+    (config && config.categories || []).forEach(category => {
+      (category.pills || []).forEach(pill => {
+        if (!pill || pill.kind !== 'status') return;
+        const status = canonicalStatusFromPill(pill);
+        labels[status.label] = status.label;
+        colors[status.label] = status.color;
+        priority[status.label] = index;
+        index += 1;
+      });
+    });
+    return { labels, colors, priority };
+  }
+
+  const BACKLOGGD_TARGET_ADAPTERS = {
+    games: {
+      id: 'games',
+      isActive: () => !isBackloggdListsTarget(),
+      href: () => {
+        const username = getBackloggdUserSlug();
+        return username ? `https://backloggd.com/u/${encodeURIComponent(username)}/games/` : '';
+      },
+      ui: {
+        metadataLabel: 'Genres',
+        advancedDescription: 'Adds genres from each Backloggd game page.',
+        platformOptions: true,
+      },
+      statusConfig: {
+        storageKey: 'bgdBackloggdStatusPillConfig',
+        discoverCollections: () => getBackloggdGamesStatusSources(),
+        defaultConfigFromCollections: () => makeDefaultBackloggdGamesStatusPillConfig(),
+        buildDefaultConfig: () => makeDefaultBackloggdGamesStatusPillConfig(),
+      },
+    },
+    lists: {
+      id: 'lists',
+      isActive: () => isBackloggdListsTarget(),
+      href: () => {
+        const username = getBackloggdUserSlug();
+        return username ? `https://backloggd.com/u/${encodeURIComponent(username)}/lists/` : '';
+      },
+      ui: {
+        metadataLabel: 'Advanced',
+        advancedDescription: 'Adds ratings, genres, platforms, play lengths, and release dates from each game page.',
+        platformOptions: false,
+      },
+      statusConfig: {
+        storageKey: 'bgdBackloggdListsStatusPillConfig',
+        loadAllCounts: null,
+        discoverCollections: () => preloadBackloggdListCollections(),
+        defaultConfigFromCollections: () => makeDefaultBackloggdListsStatusPillConfig(),
+        buildDefaultConfig: collections => makeDefaultBackloggdListsStatusPillConfig(collections),
+      },
+    },
+  };
+
+  function getBackloggdTargetAdapter(targetId = '') {
+    if (targetId && BACKLOGGD_TARGET_ADAPTERS[targetId]) return BACKLOGGD_TARGET_ADAPTERS[targetId];
+    return isBackloggdListsTarget() ? BACKLOGGD_TARGET_ADAPTERS.lists : BACKLOGGD_TARGET_ADAPTERS.games;
   }
 
   function getMobyGamesCollectionUserSlug() {
@@ -941,6 +1461,112 @@ ZX81`
   function getHowLongToBeatUserSlug() {
     const match = location.pathname.match(/^\/user\/([^/?#]+)(?:\/|$)/i);
     return match ? decodeURIComponent(match[1]) : '';
+  }
+
+  function getGameFaqsUsername(doc = document) {
+    const welcome = doc.querySelector('span.top_user_drop a.welcome, .top_user_drop .welcome, a.welcome[href="/user"]');
+    if (!welcome) return '';
+    const directText = [...welcome.childNodes]
+      .filter(node => node.nodeType === Node.TEXT_NODE)
+      .map(node => node.textContent || '')
+      .join(' ')
+      .trim()
+      .replace(/\s+/g, ' ');
+    return directText || String(welcome.textContent || '').trim().replace(/\s+/g, ' ');
+  }
+
+  function getIgdbUserSlug(pageUrl = location.href) {
+    try {
+      const url = new URL(pageUrl, location.origin);
+      const match = url.pathname.match(/^\/users\/([^/?#]+)(?:\/|$)/i);
+      return match ? decodeURIComponent(match[1]) : '';
+    } catch (_) {
+      return '';
+    }
+  }
+
+  let igdbTargetOverride = '';
+
+  function isIgdbListsTarget(pageUrl = location.href) {
+    try {
+      const url = new URL(pageUrl, location.origin);
+      const hash = url.hash.toLowerCase();
+      if (hash === '#lists') return true;
+      if (hash === '#overview') return false;
+      if (/^\/users\/[^/?#]+\/lists(?:\/|$)/i.test(url.pathname)) return true;
+      if (igdbTargetOverride && pageUrl === location.href) return igdbTargetOverride === 'lists';
+      if (pageUrl === location.href && igdbRenderedPageLooksLikeListsTarget()) return true;
+      return false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function redirectToSelectedIgdbTargetIfNeeded(pageUrl = location.href) {
+    if (!isIgdbHost()) return false;
+    try {
+      const url = new URL(pageUrl, location.origin);
+      const username = getIgdbUserSlug(url.href);
+      if (!username) return false;
+      const hash = url.hash.toLowerCase();
+      const isProfileRoot = url.pathname === `/users/${encodeURIComponent(username)}`;
+      const isAllowedHash = hash === '' || hash === '#overview' || hash === '#lists';
+      if (isProfileRoot && isAllowedHash) return false;
+      return `https://www.igdb.com/users/${encodeURIComponent(username)}${isIgdbListsTarget(url.href) ? '#lists' : '#overview'}`;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function redirectToGameFaqsCollectionIfNeeded(pageUrl = location.href) {
+    if (!isGameFaqsHost()) return false;
+    try {
+      const pathname = new URL(pageUrl, location.origin).pathname.replace(/\/+$/, '');
+      if (pathname === '/mygames/collection' || pathname === '/mygames/lists') return false;
+      return 'https://gamefaqs.gamespot.com/mygames/collection';
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function redirectToSourceActionPageIfNeeded() {
+    let targetUrl = '';
+    if (isBackloggdHost()) {
+      const username = getBackloggdUserSlug();
+      if (username) {
+        const expectedPath = isBackloggdListsTarget()
+          ? `/u/${encodeURIComponent(username)}/lists/`
+          : `/u/${encodeURIComponent(username)}/games/`;
+        if (location.pathname !== expectedPath) targetUrl = `${location.origin}${expectedPath}`;
+      }
+    } else if (isMobyGamesHost()) {
+      const collectionUrl = getMobyGamesCollectionRootUrl(location.href);
+      if (collectionUrl && !isMobyGamesCollectionRootPage(location.href)) targetUrl = collectionUrl;
+    } else if (isHowLongToBeatHost()) {
+      const gamesRootUrl = getHowLongToBeatUserGamesRootUrl(location.href);
+      if (!isHowLongToBeatCollectionsTarget() && gamesRootUrl && !isHowLongToBeatUserGamesRootPage(location.href)) {
+        targetUrl = gamesRootUrl;
+      }
+    } else if (isIgdbHost()) {
+      targetUrl = redirectToSelectedIgdbTargetIfNeeded() || '';
+    } else if (isGameFaqsHost()) {
+      targetUrl = redirectToGameFaqsCollectionIfNeeded() || '';
+    }
+    if (!targetUrl) return false;
+    navigateToCorrectSourcePage(targetUrl);
+    return true;
+  }
+
+  function navigateToCorrectSourcePage(targetUrl) {
+    if (!targetUrl) return false;
+    try {
+      localStorage.setItem(
+        PENDING_NAV_MESSAGE_KEY,
+        'Navigated to the correct page. Continue with configurations or exporting.'
+      );
+    } catch (_) {}
+    location.href = targetUrl;
+    return true;
   }
 
   function getHowLongToBeatUserGamesRootUrl(pageUrl = location.href) {
@@ -985,12 +1611,22 @@ ZX81`
     const displayNameAttr = displayNameEl && (displayNameEl.getAttribute(':display-name') || displayNameEl.getAttribute('display-name'));
     const displayName = String(displayNameAttr || '').trim().replace(/^['"]|['"]$/g, '');
     if (displayName) return displayName;
-    const title = doc.querySelector('meta[property="og:title"]') && doc.querySelector('meta[property="og:title"]').content;
+    const title = doc.querySelector('meta[property="og:title"]')?.content;
     const titleMatch = String(title || '').match(/^Game Collection for\s+(.+?)(?:\s+\(@[^)]*\))?\s+-\s+MobyGames$/i);
     return titleMatch ? titleMatch[1].trim() : '';
   }
 
   function getUserSlug() {
+    if (/^gamefaqs\.gamespot\.com$/i.test(location.hostname)) {
+      return getGameFaqsUsername() || (location.pathname.replace(/\/+$/, '') === '/mygames' ? 'GameFAQs User' : '');
+    }
+    if (/^www\.igdb\.com$/i.test(location.hostname)) {
+      return getIgdbUserSlug();
+    }
+    if (/^(?:www\.)?vndb\.org$/i.test(location.hostname)) {
+      const match = location.pathname.match(/^\/(u\d+)\/ulist(?:\/|$)/i);
+      return match ? match[1] : '';
+    }
     if (/^(?:www\.)?mobygames\.com$/i.test(location.hostname)) {
       return getMobyGamesCollectionUserSlug();
     }
@@ -1008,6 +1644,30 @@ ZX81`
     return /^(?:www\.)?howlongtobeat\.com$/i.test(location.hostname);
   }
 
+  function isHowLongToBeatCollectionsTarget(pageUrl = location.href) {
+    try {
+      return /^\/user\/[^/?#]+\/lists(?:\/|$)/i.test(new URL(pageUrl, location.origin).pathname);
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function isVndbHost() {
+    return /^(?:www\.)?vndb\.org$/i.test(location.hostname);
+  }
+
+  function isGameFaqsHost() {
+    return /^gamefaqs\.gamespot\.com$/i.test(location.hostname);
+  }
+
+  function isIgdbHost() {
+    return /^www\.igdb\.com$/i.test(location.hostname);
+  }
+
+  function isBackloggdHost() {
+    return /^(?:www\.)?backloggd\.com$/i.test(location.hostname);
+  }
+
   function isConfiguredStatusSourceHost() {
     return !!getSourceStatusConfigDescriptorForHost();
   }
@@ -1018,6 +1678,7 @@ ZX81`
   // - Add site-specific page detection, scraping, parser, and payload-normalization functions.
   // - Wire formats with configureSourceDescriptor(..., { formats }) after the builders/parsers exist.
   // - Wire runtime with configureSourceDescriptor(..., { runtime }) after the export functions exist.
+  // - Add exportedHtml overrides only when the shared default viewer behavior is not suitable.
   // - Prefer registry helpers over direct sourceWebsite string checks in shared code.
   // - Add descriptor diagnostics for host matching, format builders, runtime mapping, and required fields.
   const DEFAULT_SOURCE_ID = 'backloggd';
@@ -1025,7 +1686,64 @@ ZX81`
     hostClass: 'bgd-host-mobygames',
     hasStatusConfiguration: true,
     metadataLabel: 'Advanced',
+    metadataOption: true,
+    advancedDescription: 'Adds extra metadata loaded from each game page.',
     platformOptions: false,
+    targetOptions: false,
+    redirectToActionPageIfNeeded: null,
+  };
+  const DEFAULT_STATUS_CONFIG = {
+    discoverCollections: null,
+    defaultConfigFromCollections: null,
+    prepareDefaultReset: null,
+    buildDefaultConfig: null,
+    syncDefaultCounts: null,
+    storageKey: '',
+    loadAllCounts: null,
+    loadAllCountsLabel: 'Load All Counts',
+    showLoadAllCountsTooltip: true,
+    loadAllCountsTooltip: 'Fallback if page counts fail to load.',
+  };
+  // Future sources inherit the current HowLongToBeat exported viewer behavior.
+  const DEFAULT_EXPORTED_HTML_TEMPLATE = 'standardHtml';
+  const SHARED_EXPORT_ITEM_FIELDS = Object.freeze([
+    'title',
+    'url',
+    'cover_url',
+    'status',
+    'statuses',
+    'release_date',
+    'languages',
+    'length',
+    'genres',
+    'platforms',
+    'user_rating',
+    'average_rating',
+  ]);
+  const EXPORTED_HTML_TEMPLATES = {
+    standardHtml: {
+      layout: 'default',
+      allowGenreEmojis: false,
+      showNameSearch: true,
+      showGenreSearch: true,
+      showPlatformSearch: true,
+      showLanguageSearch: false,
+      genreLabel: 'Genres',
+      genreFilterUi: 'search',
+      genreTotalSource: 'included',
+      platformTotalSource: 'included',
+      showEmptyGenres: false,
+      showEmptyPlatforms: false,
+      statusPillConfiguration: true,
+      showUserRatingColumn: true,
+      defaultUserRatingColumn: false,
+      showOriginalTitleOption: false,
+      defaultOriginalTitle: false,
+      showLanguageColumn: false,
+      showLengthColumn: false,
+      defaultLanguageColumn: false,
+      defaultLengthColumn: false,
+    },
   };
   const SOURCE_REGISTRY = {
     backloggd: {
@@ -1044,11 +1762,46 @@ ZX81`
       ui: {
         ...DEFAULT_SOURCE_UI,
         hostClass: 'bgd-host-backloggd bgd-host-mobygames',
-        hasStatusConfiguration: false,
+        hasStatusConfiguration: true,
         metadataLabel: 'Genres',
+        advancedDescription: 'Adds genres from each Backloggd game page.',
         platformOptions: true,
+        targetOptions: [
+          {
+            id: 'games',
+            label: 'Games',
+            isActive: () => /^\/u\/[^/?#]+\/games\/?$/i.test(location.pathname),
+            href: () => getBackloggdTargetAdapter('games').href(),
+          },
+          {
+            id: 'lists',
+            label: 'Lists',
+            isActive: () => getBackloggdTargetAdapter().id === 'lists',
+            href: () => getBackloggdTargetAdapter('lists').href(),
+          },
+        ],
       },
-      statusConfig: null,
+      exportedHtml: {
+        template: DEFAULT_EXPORTED_HTML_TEMPLATE,
+        options: {
+          layout: 'backloggd',
+          allowGenreEmojis: true,
+          showGenreSearch: false,
+          genreFilterUi: 'backloggd',
+          genreTotalSource: 'provided',
+          platformTotalSource: 'provided',
+          showEmptyPlatforms: true,
+          statusPillConfiguration: false,
+          defaultUserRatingColumn: true,
+        },
+      },
+      statusConfig: {
+        discoverCollections: getBackloggdStatusSources,
+        defaultConfigFromCollections: () => getBackloggdTargetAdapter().statusConfig.defaultConfigFromCollections(),
+        storageKey: 'bgdBackloggdStatusPillConfig',
+        loadAllCountsLabel: 'Load Sub-Status Counts',
+        showLoadAllCountsTooltip: false,
+      },
       media: {
         offlineCovers: {
           enabled: true,
@@ -1057,8 +1810,8 @@ ZX81`
         },
       },
       fields: {
-        sharedItemFields: ['title', 'url', 'cover_url', 'status', 'statuses', 'release_date', 'genres', 'platforms', 'user_rating', 'average_rating'],
-        sourceMetaFields: ['game_id', 'play_type'],
+        sharedItemFields: SHARED_EXPORT_ITEM_FIELDS,
+        sourceMetaFields: ['game_id', 'play_type', 'list', 'lists', 'list_url', 'list_urls', 'lengths', 'status_ids'],
         preserveSourceMetaFieldsOnItems: true,
       },
       formats: null,
@@ -1079,6 +1832,17 @@ ZX81`
       },
       ui: {
         ...DEFAULT_SOURCE_UI,
+        advancedDescription: 'Adds genres, gameplay categories, full release dates, all platforms, and player average ratings.',
+      },
+      exportedHtml: {
+        template: DEFAULT_EXPORTED_HTML_TEMPLATE,
+        options: {
+          genreTotalSource: 'provided',
+          platformTotalSource: 'provided',
+          showEmptyGenres: true,
+          showEmptyPlatforms: true,
+          defaultUserRatingColumn: true,
+        },
       },
       statusConfig: null,
       media: {
@@ -1099,7 +1863,7 @@ ZX81`
         },
       },
       fields: {
-        sharedItemFields: ['title', 'url', 'cover_url', 'status', 'statuses', 'release_date', 'genres', 'platforms', 'user_rating', 'average_rating'],
+        sharedItemFields: SHARED_EXPORT_ITEM_FIELDS,
         sourceMetaFields: ['collection', 'collections', 'collection_url', 'collection_urls', 'gameplay', 'release_year', 'full_release_date', 'status_ids', 'status_color'],
         preserveSourceMetaFieldsOnItems: false,
       },
@@ -1122,6 +1886,34 @@ ZX81`
       ui: {
         ...DEFAULT_SOURCE_UI,
         hostClass: 'bgd-host-howlongtobeat bgd-host-mobygames',
+        advancedDescription: 'Adds full release dates, genres, all platforms, community ratings, play lengths, and full-size covers.',
+        targetOptions: [
+          {
+            id: 'game',
+            label: 'Game',
+            isActive: () => /^\/user\/[^/?#]+\/games(?:\/|$)/i.test(location.pathname),
+            href: () => {
+              const username = getHowLongToBeatUserSlug();
+              return username ? `https://howlongtobeat.com/user/${encodeURIComponent(username)}/games/` : '';
+            },
+          },
+          {
+            id: 'collections',
+            label: 'Collections',
+            isActive: () => /\/user\/[^/?#]+\/lists(?:\/|$)/i.test(location.pathname),
+            href: () => {
+              const username = getHowLongToBeatUserSlug();
+              return username ? `https://howlongtobeat.com/user/${encodeURIComponent(username)}/lists` : '';
+            },
+          },
+        ],
+      },
+      exportedHtml: {
+        template: DEFAULT_EXPORTED_HTML_TEMPLATE,
+        options: {
+          showLengthColumn: true,
+          defaultLengthColumn: true,
+        },
       },
       statusConfig: null,
       media: {
@@ -1137,8 +1929,201 @@ ZX81`
         },
       },
       fields: {
-        sharedItemFields: ['title', 'url', 'cover_url', 'status', 'statuses', 'release_date', 'genres', 'platforms', 'user_rating', 'average_rating'],
+        sharedItemFields: SHARED_EXPORT_ITEM_FIELDS,
         sourceMetaFields: ['category', 'categories', 'category_url', 'category_urls', 'status_ids', 'status_color'],
+        preserveSourceMetaFieldsOnItems: false,
+      },
+      formats: null,
+      runtime: null,
+    },
+    vndb: {
+      id: 'vndb',
+      label: 'VNDB',
+      sourceWebsite: 'VNDB',
+      converterMode: 'vndb',
+      match: {
+        hostPattern: 'vndb.org',
+        hostRegex: /^(?:www\.)?vndb\.org$/i,
+      },
+      export: {
+        filenameSuffix: 'vndb-library',
+        optionKeys: ['includeGenres', 'includeOfflineCovers'],
+      },
+      ui: {
+        ...DEFAULT_SOURCE_UI,
+        hostClass: 'bgd-host-vndb bgd-host-mobygames',
+        metadataLabel: 'Tags',
+        metadataOption: true,
+        advancedDescription: 'Adds VNDB tags from each visual novel page.',
+      },
+      exportedHtml: {
+        template: DEFAULT_EXPORTED_HTML_TEMPLATE,
+        options: {
+          defaultUserRatingColumn: true,
+          showOriginalTitleOption: true,
+          showLanguageColumn: true,
+          defaultLanguageColumn: true,
+          showLanguageSearch: true,
+          genreLabel: 'Tags',
+        },
+      },
+      statusConfig: null,
+      media: {
+        offlineCovers: {
+          enabled: true,
+          label: 'Offline Covers',
+          options: {},
+        },
+      },
+      fields: {
+        sharedItemFields: SHARED_EXPORT_ITEM_FIELDS,
+        sourceMetaFields: ['vn_id', 'original_title', 'rating_votes', 'labels', 'status_ids'],
+        preserveSourceMetaFieldsOnItems: false,
+      },
+      formats: null,
+      runtime: null,
+    },
+    gamefaqs: {
+      id: 'gamefaqs',
+      label: 'GameFAQs',
+      sourceWebsite: 'GameFAQs',
+      converterMode: 'gamefaqs',
+      match: {
+        hostPattern: 'gamefaqs.gamespot.com',
+        hostRegex: /^gamefaqs\.gamespot\.com$/i,
+      },
+      export: {
+        filenameSuffix: 'gamefaqs-library',
+        optionKeys: ['includeEnhancedMetadata', 'includeOfflineCovers'],
+      },
+      ui: {
+        ...DEFAULT_SOURCE_UI,
+        hostClass: 'bgd-host-gamefaqs bgd-host-mobygames',
+        redirectToActionPageIfNeeded: redirectToGameFaqsCollectionIfNeeded,
+        metadataLabel: 'Advanced',
+        metadataOption: true,
+        advancedDescription: 'Adds genres, full release dates, all platforms, user ratings and counts, play lengths and counts, difficulty, developer, publisher, description, age rating, and Metacritic score, review count, and URL.',
+        targetOptions: [
+          {
+            id: 'collection',
+            label: 'Collection',
+            isActive: () => location.pathname.replace(/\/+$/, '') !== '/mygames/lists',
+            href: () => 'https://gamefaqs.gamespot.com/mygames/collection',
+          },
+          {
+            id: 'lists',
+            label: 'Lists',
+            isActive: () => location.pathname.replace(/\/+$/, '') === '/mygames/lists',
+            href: () => 'https://gamefaqs.gamespot.com/mygames/lists',
+          },
+        ],
+      },
+      exportedHtml: {
+        template: DEFAULT_EXPORTED_HTML_TEMPLATE,
+        options: {
+          platformTotalSource: 'provided',
+          showEmptyPlatforms: true,
+          showUserRatingColumn: false,
+          defaultUserRatingColumn: false,
+          showLengthColumn: true,
+          defaultLengthColumn: true,
+        },
+      },
+      statusConfig: null,
+      media: {
+        offlineCovers: {
+          enabled: true,
+          label: 'Offline Covers',
+          options: {},
+        },
+      },
+      fields: {
+        sharedItemFields: SHARED_EXPORT_ITEM_FIELDS,
+        sourceMetaFields: [
+          'product_id', 'list', 'lists', 'list_id', 'list_ids', 'release_year',
+          'status_ids', 'status_color', 'developer', 'publisher', 'description',
+          'date_published', 'user_rating_count', 'average_length_hours',
+          'length_rating_count', 'average_difficulty', 'difficulty_rating_count',
+          'difficulty_label', 'age_rating', 'age_rating_description',
+          'metacritic_score', 'metacritic_review_count', 'metacritic_url',
+        ],
+        preserveSourceMetaFieldsOnItems: false,
+      },
+      formats: null,
+      runtime: null,
+    },
+    igdb: {
+      id: 'igdb',
+      label: 'IGDB',
+      sourceWebsite: 'IGDB',
+      converterMode: 'igdb',
+      match: {
+        hostPattern: 'igdb.com',
+        hostRegex: /^www\.igdb\.com$/i,
+      },
+      export: {
+        filenameSuffix: 'igdb-library',
+        optionKeys: ['includeEnhancedMetadata', 'includeOfflineCovers'],
+      },
+      ui: {
+        ...DEFAULT_SOURCE_UI,
+        hostClass: 'bgd-host-igdb bgd-host-mobygames',
+        redirectToActionPageIfNeeded: redirectToSelectedIgdbTargetIfNeeded,
+        metadataLabel: 'Advanced',
+        metadataOption: true,
+        advancedDescription: 'Adds genres, themes, community ratings, personal ratings, and rating-count labels.',
+        targetOptions: [
+          {
+            id: 'overview',
+            label: 'Overview',
+            isActive: () => {
+              const username = getIgdbUserSlug();
+              const expectedPath = username ? `/users/${encodeURIComponent(username)}` : '';
+              const hash = location.hash.toLowerCase();
+              return !!expectedPath
+                && location.pathname.replace(/\/+$/, '') === expectedPath
+                && (hash === '' || hash === '#overview');
+            },
+            href: () => {
+              const username = getIgdbUserSlug();
+              return username ? `https://www.igdb.com/users/${encodeURIComponent(username)}#overview` : '';
+            },
+          },
+          {
+            id: 'lists',
+            label: 'Lists',
+            isActive: () => location.hash.toLowerCase() === '#lists',
+            href: () => {
+              const username = getIgdbUserSlug();
+              return username ? `https://www.igdb.com/users/${encodeURIComponent(username)}#lists` : '';
+            },
+          },
+        ],
+      },
+      exportedHtml: {
+        template: DEFAULT_EXPORTED_HTML_TEMPLATE,
+        options: {
+          genreTotalSource: 'provided',
+          platformTotalSource: 'provided',
+          showEmptyGenres: true,
+          showEmptyPlatforms: true,
+        },
+      },
+      statusConfig: null,
+      media: {
+        offlineCovers: {
+          enabled: true,
+          label: 'Offline Covers',
+          options: {},
+        },
+      },
+      fields: {
+        sharedItemFields: SHARED_EXPORT_ITEM_FIELDS,
+        sourceMetaFields: [
+          'game_id', 'list', 'list_slug', 'source_status', 'status_ids',
+          'platform_releases', 'igdb_genres', 'igdb_themes',
+          'rating_count_label',
+        ],
         preserveSourceMetaFieldsOnItems: false,
       },
       formats: null,
@@ -1179,19 +2164,58 @@ ZX81`
   }
 
   function getSourceUiDescriptorForHost(hostname = location.hostname) {
-    return {
+    const resolved = {
       ...DEFAULT_SOURCE_UI,
       ...(getSourceDescriptorForHost(hostname).ui || {}),
     };
+    if (/^(?:www\.)?backloggd\.com$/i.test(String(hostname || ''))) {
+      Object.assign(resolved, getBackloggdTargetAdapter().ui);
+    }
+    return resolved;
   }
 
   function getSourceStatusConfigDescriptorForHost(hostname = location.hostname) {
-    return getSourceDescriptorForHost(hostname).statusConfig || null;
+    const statusConfig = getSourceDescriptorForHost(hostname).statusConfig;
+    if (!statusConfig) return null;
+    const resolved = { ...DEFAULT_STATUS_CONFIG, ...statusConfig };
+    if (/^gamefaqs\.gamespot\.com$/i.test(String(hostname || ''))) {
+      const isListsTarget = location.pathname.replace(/\/+$/, '') === '/mygames/lists';
+      resolved.storageKey = isListsTarget
+        ? GAMEFAQS_LISTS_STATUS_PILL_CONFIG_STORAGE_KEY
+        : GAMEFAQS_STATUS_PILL_CONFIG_STORAGE_KEY;
+    }
+    if (/^(?:www\.)?howlongtobeat\.com$/i.test(String(hostname || '')) && isHowLongToBeatCollectionsTarget()) {
+      resolved.storageKey = HLTB_COLLECTIONS_STATUS_PILL_CONFIG_STORAGE_KEY;
+      resolved.loadAllCounts = null;
+    }
+    if (/^www\.igdb\.com$/i.test(String(hostname || ''))) {
+      const isListsTarget = isIgdbListsTarget();
+      resolved.storageKey = isListsTarget ? IGDB_LISTS_STATUS_PILL_CONFIG_STORAGE_KEY : IGDB_STATUS_PILL_CONFIG_STORAGE_KEY;
+    }
+    if (/^(?:www\.)?backloggd\.com$/i.test(String(hostname || ''))) {
+      Object.assign(resolved, getBackloggdTargetAdapter().statusConfig);
+    }
+    return resolved;
   }
 
   function getSourceOfflineCoverOptions(sourceId = DEFAULT_SOURCE_ID) {
     const source = getSourceDescriptorById(sourceId);
     return (source.media && source.media.offlineCovers && source.media.offlineCovers.options) || {};
+  }
+
+  function resolveExportedHtmlTemplateOptions(source) {
+    const exportedHtml = source.exportedHtml || {};
+    const templateName = exportedHtml.template || DEFAULT_EXPORTED_HTML_TEMPLATE;
+    const template = EXPORTED_HTML_TEMPLATES[templateName] || EXPORTED_HTML_TEMPLATES[DEFAULT_EXPORTED_HTML_TEMPLATE];
+    return {
+      ...template,
+      ...(exportedHtml.options || {}),
+      template: templateName,
+    };
+  }
+
+  function getExportedHtmlTemplateOptions(sourceWebsite) {
+    return resolveExportedHtmlTemplateOptions(getSourceDescriptorByWebsite(sourceWebsite));
   }
 
   function configureSourceDescriptor(sourceId, sections) {
@@ -1220,12 +2244,26 @@ ZX81`
   const STATUS_PILL_CONFIG_STORAGE_KEY = 'bgdMobyStatusPillConfig';
   const PENDING_NAV_MESSAGE_KEY = 'bgdPendingNavMessage';
   const MOBYGAMES_EXPORT_STATE_KEY = 'bgdMobyGamesExportState';
+  const MOBYGAMES_EXPORT_CANCEL_KEY = 'bgdMobyGamesExportCancelled';
   const HLTB_STATUS_PILL_CONFIG_STORAGE_KEY = 'bgdHowLongToBeatStatusPillConfig';
+  const HLTB_COLLECTIONS_STATUS_PILL_CONFIG_STORAGE_KEY = 'bgdHowLongToBeatCollectionsStatusPillConfig';
   const HLTB_EXPORT_STATE_KEY = 'bgdHowLongToBeatExportState';
+  const HLTB_EXPORT_CANCEL_KEY = 'bgdHowLongToBeatExportCancelled';
+  const VNDB_STATUS_PILL_CONFIG_STORAGE_KEY = 'bgdVndbStatusPillConfig';
+  const GAMEFAQS_STATUS_PILL_CONFIG_STORAGE_KEY = 'bgdGameFaqsStatusPillConfig';
+  const GAMEFAQS_LISTS_STATUS_PILL_CONFIG_STORAGE_KEY = 'bgdGameFaqsCustomListsStatusPillConfig';
+  const IGDB_STATUS_PILL_CONFIG_STORAGE_KEY = 'bgdIgdbStatusPillConfig';
+  const IGDB_LISTS_STATUS_PILL_CONFIG_STORAGE_KEY = 'bgdIgdbListsStatusPillConfig';
+  const BACKLOGGD_STATUS_PILL_CONFIG_STORAGE_KEY = 'bgdBackloggdStatusPillConfig';
+  const EXPORT_STATE_SCHEMA_VERSION = 1;
+  const EXPORT_PAYLOAD_SCHEMA_VERSION = 1;
+  const EXPORT_STATE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+  const CONSECUTIVE_SCRAPE_FAILURE_LIMIT = 10;
   const STATUS_PILL_SLOT_COUNT = 4;
   const MOBYGAMES_COLLECTION_CACHE_TTL_MS = 5 * 60 * 1000;
   const STATUS_PILL_SOURCE_DEFS = {
-    played:    { label: 'Played',    type: 'play_type', value: 'played',    color: PLAY_TYPE_COLORS.played },
+    played:    { label: 'Played', type: 'status', value: 'played', color: STATUS_COLORS.played },
+    'played-sub': { label: 'Played Sub-Status', type: 'play_type', value: 'played', color: PLAY_TYPE_COLORS.played },
     completed: { label: 'Completed', type: 'play_type', value: 'completed', color: PLAY_TYPE_COLORS.completed },
     retired:   { label: 'Retired',   type: 'play_type', value: 'retired',   color: PLAY_TYPE_COLORS.retired },
     shelved:   { label: 'Shelved',   type: 'play_type', value: 'shelved',   color: PLAY_TYPE_COLORS.shelved },
@@ -1234,8 +2272,78 @@ ZX81`
     backlog:   { label: 'Backlog',   type: 'status',    value: 'backlog',   color: STATUS_COLORS.backlog },
     wishlist:  { label: 'Wishlist',  type: 'status',    value: 'wishlist',  color: STATUS_COLORS.wishlist },
   };
+  let backloggdStatusSourceCounts = {
+    played: 0,
+    playing: 0,
+    backlog: 0,
+    wishlist: 0,
+  };
+  let backloggdBasicScrapeCache = null;
+  let backloggdListCollectionsCache = null;
+  let backloggdListCollectionsPromise = null;
 
-  function makeDefaultStatusPillConfig() {
+  function makeDefaultBackloggdListsStatusPillConfig(
+    collections = backloggdListCollectionsCache || parseBackloggdListIndexDocument(document)
+  ) {
+    const colors = ['#1fbf75', '#2f8df7', '#9b6cff', '#f0a500', '#d63f8c', '#6488e8', '#c47f1a', '#138fae'];
+    const pills = collections.map((collection, index) => ({
+      id: `backloggd-list-${index + 1}`,
+      kind: 'status',
+      label: collection.name,
+      color: colors[index % colors.length],
+      source: { type: 'list', value: collection.url },
+      collections: [{ ...collection }],
+    }));
+    const categories = [];
+    for (let index = 0; index < pills.length; index += STATUS_PILL_SLOT_COUNT) {
+      categories.push({
+        id: `backloggd-lists-group-${categories.length + 1}`,
+        label: `Group ${categories.length + 1}`,
+        pills: pills.slice(index, index + STATUS_PILL_SLOT_COUNT),
+      });
+    }
+    while (categories.length < 3) {
+      categories.push({
+        id: `backloggd-lists-group-${categories.length + 1}`,
+        label: `Group ${categories.length + 1}`,
+        pills: [],
+      });
+    }
+    return { categories };
+  }
+
+  function ensureBackloggdListsThreeGroups(config) {
+    if (!config || !Array.isArray(config.categories)) return config;
+    while (config.categories.length < 3) {
+      config.categories.push({
+        id: `backloggd-lists-group-${config.categories.length + 1}`,
+        label: `Group ${config.categories.length + 1}`,
+        pills: [],
+      });
+    }
+    return config;
+  }
+
+  function makeDefaultBackloggdGamesStatusPillConfig() {
+    const sourceCollection = sourceId => {
+      const source = STATUS_PILL_SOURCE_DEFS[sourceId];
+      return {
+        name: source.label,
+        games: 0,
+        url: `backloggd-source:${sourceId}`,
+      };
+    };
+    const status = (id, label, color, sourceId) => {
+      const source = STATUS_PILL_SOURCE_DEFS[sourceId];
+      return {
+        id,
+        kind: 'status',
+        label,
+        color,
+        source: { type: source.type, value: source.value },
+        collections: [sourceCollection(sourceId)],
+      };
+    };
     return {
       categories: [
         {
@@ -1243,17 +2351,17 @@ ZX81`
           label: 'Group 1',
           pills: [
             { id: 'agg-played-total', kind: 'aggregate', label: 'Played Total', sources: ['played', 'completed', 'retired', 'shelved', 'abandoned'] },
-            { id: 'played', kind: 'status', label: 'Played', color: PLAY_TYPE_COLORS.played, source: { type: 'play_type', value: 'played' } },
-            { id: 'completed', kind: 'status', label: 'Completed', color: PLAY_TYPE_COLORS.completed, source: { type: 'play_type', value: 'completed' } },
+            status('played', 'Played', PLAY_TYPE_COLORS.played, 'played-sub'),
+            status('completed', 'Completed', PLAY_TYPE_COLORS.completed, 'completed'),
           ],
         },
         {
           id: 'cat-retired',
           label: 'Group 2',
           pills: [
-            { id: 'retired', kind: 'status', label: 'Retired', color: PLAY_TYPE_COLORS.retired, source: { type: 'play_type', value: 'retired' } },
-            { id: 'shelved', kind: 'status', label: 'Shelved', color: PLAY_TYPE_COLORS.shelved, source: { type: 'play_type', value: 'shelved' } },
-            { id: 'abandoned', kind: 'status', label: 'Abandoned', color: PLAY_TYPE_COLORS.abandoned, source: { type: 'play_type', value: 'abandoned' } },
+            status('retired', 'Retired', PLAY_TYPE_COLORS.retired, 'retired'),
+            status('shelved', 'Shelved', PLAY_TYPE_COLORS.shelved, 'shelved'),
+            status('abandoned', 'Abandoned', PLAY_TYPE_COLORS.abandoned, 'abandoned'),
           ],
         },
         {
@@ -1261,9 +2369,9 @@ ZX81`
           label: 'Group 3',
           pills: [
             { id: 'agg-queue', kind: 'aggregate', label: 'Queue', sources: ['playing', 'backlog', 'wishlist'] },
-            { id: 'playing', kind: 'status', label: 'Playing', color: STATUS_COLORS.playing, source: { type: 'status', value: 'playing' } },
-            { id: 'backlog', kind: 'status', label: 'Backlog', color: STATUS_COLORS.backlog, source: { type: 'status', value: 'backlog' } },
-            { id: 'wishlist', kind: 'status', label: 'Wishlist', color: STATUS_COLORS.wishlist, source: { type: 'status', value: 'wishlist' } },
+            status('playing', 'Playing', STATUS_COLORS.playing, 'playing'),
+            status('backlog', 'Backlog', STATUS_COLORS.backlog, 'backlog'),
+            status('wishlist', 'Wishlist', STATUS_COLORS.wishlist, 'wishlist'),
           ],
         },
       ],
@@ -1327,14 +2435,99 @@ ZX81`
   let panel, minimizeBtn, restoreBtn, exportBtn, configBtn, diagnosticsBtn, runControls, pauseExportBtn, stopExportBtn,
       chkCsv, chkJson, chkHtml, fileChangeNote, versionNotice,
       converterBtn, converterPanel, converterCloseBtn, converterRunBtn, converterFileInput,
-      chkGenres, chkOfflineCovers, chkPlatforms, chkPlatforms226, log, fill;
-  let statusPillConfig = makeDefaultStatusPillConfig();
+      chkGenres, chkOfflineCovers, chkPlatforms, chkPlatforms226, targetButtons, log, fill;
+  // Resolved from the active source and target only when the panel mounts.
+  let statusPillConfig = null;
   let statusPillConfigModal = null;
   let mobyGamesCollectionCache = null;
   let mobyGamesCollectionLastDebug = null;
+  let mobyGamesResumePromise = null;
   let hltbPreflightCategories = null;
   let hltbPreflightData = null;
   let hltbPreflightInProgress = false;
+  let hltbListCollectionsCache = null;
+  let hltbListCollectionsPromise = null;
+  let igdbListCollectionsCache = null;
+  let igdbListCollectionsPromise = null;
+  let igdbStatusCollectionsCache = null;
+  let igdbBasicScrapeCache = null;
+  let igdbTemporaryScrapeStateKey = '';
+
+  function clearIgdbTemporaryScrapeState() {
+    igdbListCollectionsCache = null;
+    igdbListCollectionsPromise = null;
+    igdbStatusCollectionsCache = null;
+    igdbBasicScrapeCache = null;
+  }
+
+  function hasIgdbTemporaryScrapeState() {
+    return !!(
+      igdbListCollectionsCache
+      || igdbListCollectionsPromise
+      || igdbStatusCollectionsCache
+      || igdbBasicScrapeCache
+    );
+  }
+
+  function getIgdbTemporaryScrapeStateKey(pageUrl = location.href) {
+    if (!isIgdbHost()) return '';
+    try {
+      const url = new URL(pageUrl, location.origin);
+      const username = getIgdbUserSlug(url.href);
+      const renderedTarget = pageUrl === location.href && igdbRenderedPageLooksLikeListsTarget() ? 'lists' : 'overview';
+      return `${username}|${url.pathname}|${url.search}|${url.hash.toLowerCase()}|${renderedTarget}`;
+    } catch (_) {
+      return '';
+    }
+  }
+
+  function syncIgdbTemporaryScrapeStateForNavigation() {
+    if (!isIgdbHost()) {
+      igdbTemporaryScrapeStateKey = '';
+      return;
+    }
+    const nextKey = getIgdbTemporaryScrapeStateKey();
+    if (!nextKey) return;
+    if (igdbTemporaryScrapeStateKey && igdbTemporaryScrapeStateKey !== nextKey) {
+      clearIgdbTemporaryScrapeState();
+    }
+    igdbTemporaryScrapeStateKey = nextKey;
+  }
+
+  function igdbRenderedPageLooksLikeListsTarget(doc = document, pageUrl = location.href) {
+    if (!isIgdbHost()) return false;
+    try {
+      if (doc !== document) return parseIgdbListCollectionsDocument(doc, pageUrl).length > 0;
+      const username = getIgdbUserSlug(pageUrl);
+      if (!username) return false;
+      const pathPrefix = `/users/${encodeURIComponent(username)}/lists/`;
+      return [...document.querySelectorAll(`a[href^="${pathPrefix}"]`)]
+        .some(link => {
+          const href = link.getAttribute('href') || '';
+          const slug = href.slice(pathPrefix.length).split(/[?#/]/)[0];
+          return !!slug && !!(link.offsetWidth || link.offsetHeight || link.getClientRects().length);
+        });
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function isIgdbAppContentNode(node) {
+    const element = node && node.nodeType === Node.ELEMENT_NODE
+      ? node
+      : node && node.parentElement;
+    if (!element || element.closest(`#${EXPORTER_ID}`)) return false;
+    return !!element.closest('#content-page, [id^="App-react-component-"]');
+  }
+
+  function isIgdbAppContentMutation(mutations) {
+    if (!isIgdbHost()) return false;
+    return mutations.some(mutation =>
+      isIgdbAppContentNode(mutation.target)
+      || [...mutation.addedNodes].some(isIgdbAppContentNode)
+      || [...mutation.removedNodes].some(isIgdbAppContentNode)
+    );
+  }
   let logUpdateLines = new Map();
   let panelCleanupFns = [];
   let exportInProgress = false;
@@ -1345,10 +2538,13 @@ ZX81`
   let exportPausedTotalMs = 0;
   let exportPriorElapsedMs = 0;
   let exportStopMessageShown = false;
+  const downloadedFilenamesThisSession = new Set();
   const activeExportFetchControllers = new Set();
   let exportStartFileFormatSignature = '';
   let fileChangeNoteTimer = null;
   let configButtonDisabledTimer = null;
+  let activeStatusPillConfigStorageKey = '';
+  const loadedSourceCollectionCounts = new Map();
 
   // ---------------------------------------------------------------------------
   // 2. Navigation and panel lifecycle
@@ -1359,8 +2555,132 @@ ZX81`
     userSlug = slug;
     if (panel) {
       const titleSlug = panel.querySelector('.bgd-title span');
-      if (titleSlug) titleSlug.textContent = `/u/${slug}`;
+      if (titleSlug) {
+        titleSlug.textContent = isIgdbHost()
+          ? `/users/${slug}`
+          : isVndbHost()
+          ? `/u/${getVndbDisplayName() || slug}`
+          : isGameFaqsHost()
+            ? slug
+            : `/u/${slug}`;
+      }
     }
+  }
+
+  function makeDefaultStatusPillConfig() {
+    return {
+      categories: [
+        {
+          id: 'cat-played',
+          label: 'Group 1',
+          pills: [
+            { id: 'agg-played-total', kind: 'aggregate', label: 'Played Total', sources: ['played', 'completed', 'retired', 'shelved', 'abandoned'] },
+            { id: 'played', kind: 'status', label: 'Played', color: PLAY_TYPE_COLORS.played, source: { type: 'play_type', value: 'played' } },
+            { id: 'completed', kind: 'status', label: 'Completed', color: PLAY_TYPE_COLORS.completed, source: { type: 'play_type', value: 'completed' } },
+          ],
+        },
+        {
+          id: 'cat-retired',
+          label: 'Group 2',
+          pills: [
+            { id: 'retired', kind: 'status', label: 'Retired', color: PLAY_TYPE_COLORS.retired, source: { type: 'play_type', value: 'retired' } },
+            { id: 'shelved', kind: 'status', label: 'Shelved', color: PLAY_TYPE_COLORS.shelved, source: { type: 'play_type', value: 'shelved' } },
+            { id: 'abandoned', kind: 'status', label: 'Abandoned', color: PLAY_TYPE_COLORS.abandoned, source: { type: 'play_type', value: 'abandoned' } },
+          ],
+        },
+        {
+          id: 'cat-queue',
+          label: 'Group 3',
+          pills: [
+            { id: 'agg-queue', kind: 'aggregate', label: 'Queue', sources: ['playing', 'backlog', 'wishlist'] },
+            { id: 'playing', kind: 'status', label: 'Playing', color: STATUS_COLORS.playing, source: { type: 'status', value: 'playing' } },
+            { id: 'backlog', kind: 'status', label: 'Backlog', color: STATUS_COLORS.backlog, source: { type: 'status', value: 'backlog' } },
+            { id: 'wishlist', kind: 'status', label: 'Wishlist', color: STATUS_COLORS.wishlist, source: { type: 'status', value: 'wishlist' } },
+          ],
+        },
+      ],
+    };
+  }
+
+  function getBackloggdGamesStatusSources() {
+    const sourceLabels = {
+      completed: 'Completed-Sub',
+      retired: 'Retired-Sub',
+      shelved: 'Shelved-Sub',
+      abandoned: 'Abandoned-Sub',
+      'played-sub': 'Played-Sub',
+    };
+    return [
+      'played', 'playing', 'backlog', 'wishlist',
+      'completed', 'retired', 'shelved', 'abandoned', 'played-sub',
+    ].map(id => ({
+      name: sourceLabels[id] || id.charAt(0).toUpperCase() + id.slice(1),
+      games: backloggdStatusSourceCounts[id] || 0,
+      url: `backloggd-source:${id}`,
+    }));
+  }
+
+  function getBackloggdStatusSources() {
+    return getBackloggdTargetAdapter().id === 'lists'
+      ? backloggdListCollectionsCache || parseBackloggdListIndexDocument(document)
+      : getBackloggdGamesStatusSources();
+  }
+
+  function preloadBackloggdStatusSourceCounts() {
+    if (!isBackloggdHost()) return;
+    if (isBackloggdListsTarget()) {
+      preloadBackloggdListCollections().catch(() => {});
+      return;
+    }
+    try {
+      const counts = { played: 0, playing: 0, backlog: 0, wishlist: 0 };
+      document.querySelectorAll('a[data-tippy-content][href*="/games/"]').forEach(link => {
+        const routeMatch = String(link.getAttribute('href') || '').match(/\/type:(played|playing|backlog|wishlist)(?:\/|$)/i);
+        if (!routeMatch) return;
+        const countMatch = String(link.getAttribute('data-tippy-content') || '').match(/([\d,]+)\s+Games?/i);
+        if (countMatch) counts[routeMatch[1].toLowerCase()] = Number(countMatch[1].replace(/,/g, '')) || 0;
+      });
+      backloggdStatusSourceCounts = counts;
+      syncConfiguredCollectionCounts(getBackloggdStatusSources());
+    } catch (_) {}
+  }
+
+  function parseBackloggdListIndexDocument(doc, pageUrl = location.href) {
+    const collections = [];
+    for (const card of doc.querySelectorAll('.list-display')) {
+      const link = card.querySelector('h2.list-display-title a[href*="/list/"]');
+      if (!link) continue;
+      const countText = card.querySelector('.entries-count')?.textContent || '';
+      const countMatch = countText.match(/([\d,]+)/);
+      collections.push({
+        name: String(link.textContent || '').trim().replace(/\s+/g, ' '),
+        games: countMatch ? Number(countMatch[1].replace(/,/g, '')) || 0 : 0,
+        url: new URL(link.getAttribute('href'), pageUrl).href,
+        first_game: String(card.querySelector('.game-cover img')?.getAttribute('alt') || '').trim(),
+      });
+    }
+    return collections;
+  }
+
+  async function preloadBackloggdListCollections() {
+    if (!isBackloggdHost() || !isBackloggdListsTarget()) return [];
+    if (backloggdListCollectionsPromise) return backloggdListCollectionsPromise;
+    backloggdListCollectionsPromise = (async () => {
+      const username = getBackloggdUserSlug();
+      const first = parseBackloggdListIndexDocument(document);
+      const byUrl = new Map(first.map(collection => [collection.url, collection]));
+      const maxPage = getDocumentMaxPage(document);
+      for (let page = 2; page <= maxPage; page += 1) {
+        const html = await requestHtmlResponse(`/u/${encodeURIComponent(username)}/lists/?page=${page}`);
+        const doc = new DOMParser().parseFromString(html, 'text/html');
+        parseBackloggdListIndexDocument(doc, location.origin).forEach(collection => byUrl.set(collection.url, collection));
+      }
+      backloggdListCollectionsCache = [...byUrl.values()];
+      return backloggdListCollectionsCache;
+    })().finally(() => {
+      backloggdListCollectionsPromise = null;
+    });
+    return backloggdListCollectionsPromise;
   }
 
   function getExportUserSlug() {
@@ -1369,6 +2689,12 @@ ZX81`
 
   function addPanelCleanup(fn) {
     panelCleanupFns.push(fn);
+  }
+
+  function removeAccessibleModal(modal) {
+    if (!modal) return;
+    if (typeof modal.__bgdDialogCleanup === 'function') modal.__bgdDialogCleanup();
+    modal.remove();
   }
 
   function cleanupPanel({ removeDom = true } = {}) {
@@ -1387,8 +2713,23 @@ ZX81`
       configButtonDisabledTimer = null;
     }
     const root = panel || document.getElementById(EXPORTER_ID);
+    if (root) {
+      root.querySelectorAll('.bgd-status-config-modal, .bgd-source-config-modal').forEach(removeAccessibleModal);
+    }
     if (removeDom && root) root.remove();
     panel = null;
+  }
+
+  function syncExportTargetButtons() {
+    if (!panel) return;
+    const targetOptions = getSourceUiDescriptorForHost().targetOptions;
+    if (!Array.isArray(targetOptions)) return;
+    panel.querySelectorAll('[data-bgd-target]').forEach(button => {
+      const target = targetOptions.find(option => option.id === button.dataset.bgdTarget);
+      const isActive = !!(target && target.isActive());
+      button.classList.toggle('is-active', isActive);
+      button.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+    });
   }
 
   function onNavigate() {
@@ -1404,19 +2745,63 @@ ZX81`
     // Clean up a detached reference left over from a body swap.
     if (panel && !document.body.contains(panel)) cleanupPanel({ removeDom: false });
 
+    const statusConfigDescriptor = getSourceStatusConfigDescriptorForHost();
+    const nextStatusConfigStorageKey = statusConfigDescriptor && statusConfigDescriptor.storageKey || '';
+    if (activeStatusPillConfigStorageKey !== nextStatusConfigStorageKey) {
+      activeStatusPillConfigStorageKey = nextStatusConfigStorageKey;
+      if (panel) cleanupPanel();
+    }
+
     // Already live - keep the target profile in sync for content-only SPA swaps.
     if (panel) {
       if (userSlug !== slug) setUserSlug(slug);
+      syncExportTargetButtons();
       return;
     }
-    if (document.getElementById(EXPORTER_ID)) {
-      setUserSlug(slug);
-      return;
+    const orphanedPanel = document.getElementById(EXPORTER_ID);
+    if (orphanedPanel) {
+      // A previous initialization may have appended the panel before throwing.
+      // Remove that unbound DOM so initPanel() can create a fully wired instance.
+      orphanedPanel.remove();
     }
     if (!document.body) return;
 
     setUserSlug(slug);
     initPanel();
+  }
+
+  let navigateRetryTimer = null;
+
+  function exporterPanelIsMounted() {
+    return !!(panel && document.body && document.body.contains(panel));
+  }
+
+  function scheduleNavigateRetry(delayMs = 250) {
+    if (navigateRetryTimer) return;
+    navigateRetryTimer = setTimeout(() => {
+      navigateRetryTimer = null;
+      safelyOnNavigate();
+    }, delayMs);
+  }
+
+  function safelyOnNavigate() {
+    try {
+      syncIgdbTemporaryScrapeStateForNavigation();
+      onNavigate();
+      const shouldHavePanel = !!getUserSlug();
+      if (shouldHavePanel && !exporterPanelIsMounted()) {
+        scheduleNavigateRetry();
+      } else if (navigateRetryTimer) {
+        clearTimeout(navigateRetryTimer);
+        navigateRetryTimer = null;
+      }
+    } catch (error) {
+      console.error('[Game Library Exporter] UI initialization failed.', error);
+      const partialPanel = document.getElementById(EXPORTER_ID);
+      if (partialPanel) partialPanel.remove();
+      panel = null;
+      scheduleNavigateRetry();
+    }
   }
 
   // -- A + B) Patch pushState, replaceState, and listen for popstate ---
@@ -1436,10 +2821,14 @@ ZX81`
   function onHistoryApiCall() {
     // URL has changed; flag that we are waiting for the DOM to catch up.
     navPending = true;
+    syncIgdbTemporaryScrapeStateForNavigation();
     // Also call onNavigate immediately - if the body is already updated
     // (e.g. bfcache restore) this handles it; if not, the MutationObserver
     // will call it once the DOM is ready.
-    queueMicrotask(onNavigate);
+    queueMicrotask(() => {
+      safelyOnNavigate();
+      syncExportTargetButtons();
+    });
   }
 
   (function patchHistoryApi() {
@@ -1456,7 +2845,20 @@ ZX81`
   })();
 
   window.addEventListener('popstate', () => {
-    queueMicrotask(onNavigate);
+    queueMicrotask(() => {
+      syncIgdbTemporaryScrapeStateForNavigation();
+      safelyOnNavigate();
+      syncExportTargetButtons();
+    });
+  });
+  window.addEventListener('hashchange', () => {
+    queueMicrotask(() => {
+      if (isIgdbHost()) igdbTargetOverride = '';
+      syncIgdbTemporaryScrapeStateForNavigation();
+      cleanupPanel();
+      if (isIgdbHost()) statusPillConfig = loadStatusPillConfig();
+      safelyOnNavigate();
+    });
   });
 
   // MutationObserver: fires when the new page's DOM is ready.
@@ -1477,16 +2879,48 @@ ZX81`
       for (const node of m.addedNodes) {
         if (node.nodeType !== Node.ELEMENT_NODE) continue;
         if (node.id === 'navbarDropdown') return true;
-        if (node.querySelector && node.querySelector('#navbarDropdown, #main-content, [data-turbo-permanent]')) return true;
+        if (node.matches && node.matches('body, main, #main-content, turbo-frame, [data-turbo-permanent]')) return true;
+        if (node.querySelector && node.querySelector('#navbarDropdown, #main-content, main, turbo-frame, [data-turbo-permanent]')) return true;
       }
     }
     return false;
   }
 
+  function supportedProfilePanelNeedsMount() {
+    if (!getUserSlug() || !document.body) return false;
+    const mountedPanel = document.getElementById(EXPORTER_ID);
+    return !mountedPanel || !document.body.contains(mountedPanel);
+  }
+
+  let profilePanelMountQueued = false;
+
+  function queueProfilePanelMount() {
+    if (profilePanelMountQueued) return;
+    profilePanelMountQueued = true;
+    queueMicrotask(() => {
+      profilePanelMountQueued = false;
+      if (supportedProfilePanelNeedsMount()) safelyOnNavigate();
+    });
+  }
+
   const observer = new MutationObserver((mutations) => {
+    const igdbAppContentChanged = isIgdbAppContentMutation(mutations);
+    if (igdbAppContentChanged) {
+      if (hasIgdbTemporaryScrapeState()) clearIgdbTemporaryScrapeState();
+      syncIgdbTemporaryScrapeStateForNavigation();
+      syncExportTargetButtons();
+    }
+    // Backloggd can replace only the profile-content subtree without adding one
+    // of the usual navbar/main landmarks. On every /u/<username>/* route, remount
+    // the exporter whenever such a replacement leaves the panel detached.
+    if (supportedProfilePanelNeedsMount()) {
+      navPending = false;
+      queueProfilePanelMount();
+      return;
+    }
     if (!navPending && !isPageReadyMutation(mutations)) return;
     navPending = false;
-    onNavigate();
+    safelyOnNavigate();
   });
 
   function startObserver() {
@@ -1496,19 +2930,31 @@ ZX81`
   }
 
   // -- D) Framework lifecycle events ---
-  document.addEventListener('turbolinks:load', onNavigate);
-  document.addEventListener('turbo:load',      onNavigate);
-  document.addEventListener('turbo:render',    onNavigate);
+  document.addEventListener('turbolinks:load', safelyOnNavigate);
+  document.addEventListener('turbo:load',      safelyOnNavigate);
+  document.addEventListener('turbo:render',    safelyOnNavigate);
+  document.addEventListener('turbo:frame-load', safelyOnNavigate);
+  document.addEventListener('turbo:before-render', () => {
+    navPending = true;
+  });
+  document.addEventListener('turbolinks:before-render', () => {
+    navPending = true;
+  });
+  window.addEventListener('pageshow', safelyOnNavigate);
+  window.addEventListener('load', safelyOnNavigate, { once: true });
 
   // -- E) Initial page load ---
   if (document.readyState === 'loading') {
+    // Try immediately as well as at DOMContentLoaded. If <body> is not available
+    // yet, safelyOnNavigate() schedules another attempt.
+    safelyOnNavigate();
     document.addEventListener('DOMContentLoaded', () => {
       startObserver();
-      onNavigate();
+      safelyOnNavigate();
     }, { once: true });
   } else {
     startObserver();
-    onNavigate();
+    safelyOnNavigate();
   }
 
   // ---------------------------------------------------------------------------
@@ -1516,6 +2962,14 @@ ZX81`
   // ---------------------------------------------------------------------------
 
   function initPanel() {
+  function initializeSourceRuntimeState() {
+    const statusConfigDescriptor = getSourceStatusConfigDescriptorForHost();
+    activeStatusPillConfigStorageKey = statusConfigDescriptor && statusConfigDescriptor.storageKey || '';
+    statusPillConfig = loadStatusPillConfig();
+    queueMicrotask(preloadBackloggdStatusSourceCounts);
+  }
+
+  initializeSourceRuntimeState();
 
   function injectStyles() {
     const style = document.createElement('style');
@@ -1560,6 +3014,93 @@ ZX81`
         appearance: none;
         -webkit-appearance: none;
         border-style: solid;
+      }
+
+      #${EXPORTER_ID} input[type="checkbox"],
+      #${EXPORTER_ID} input[type="radio"] {
+        appearance: none !important;
+        -webkit-appearance: none !important;
+        position: relative !important;
+        display: inline-block !important;
+        box-sizing: border-box !important;
+        width: 16px !important;
+        height: 16px !important;
+        min-width: 16px !important;
+        min-height: 16px !important;
+        margin: 0 !important;
+        padding: 0 !important;
+        border: 1px solid rgba(234, 244, 255, 0.58) !important;
+        background: rgba(255, 255, 255, 0.96) !important;
+        box-shadow: inset 0 1px 1px rgba(6, 16, 31, 0.20) !important;
+        vertical-align: middle !important;
+        transform: none !important;
+        filter: none !important;
+        opacity: 1 !important;
+        visibility: visible !important;
+        clip: auto !important;
+        clip-path: none !important;
+        -webkit-clip-path: none !important;
+        float: none !important;
+        inset: auto !important;
+        z-index: 1 !important;
+        flex-shrink: 0 !important;
+        cursor: pointer !important;
+        outline: none !important;
+      }
+
+      #${EXPORTER_ID} input[type="file"][hidden] {
+        display: none !important;
+        visibility: hidden !important;
+      }
+
+      #${EXPORTER_ID} input[type="checkbox"]::before,
+      #${EXPORTER_ID} input[type="radio"]::before,
+      #${EXPORTER_ID} input[type="radio"]::after {
+        content: none !important;
+        display: none !important;
+      }
+
+      #${EXPORTER_ID} input[type="checkbox"] {
+        border-radius: 3px !important;
+      }
+
+      #${EXPORTER_ID} input[type="checkbox"]::after {
+        content: '' !important;
+        display: block !important;
+        position: absolute !important;
+        left: 50% !important;
+        top: 45% !important;
+        width: 3px !important;
+        height: 7px !important;
+        box-sizing: content-box !important;
+        border: solid #082033 !important;
+        border-width: 0 2px 2px 0 !important;
+        border-radius: 0 !important;
+        background: transparent !important;
+        box-shadow: none !important;
+        opacity: 0 !important;
+        transform: translate(-50%, -50%) rotate(45deg) !important;
+        pointer-events: none !important;
+      }
+
+      #${EXPORTER_ID} input[type="checkbox"]:checked {
+        border-color: rgba(125, 211, 252, 0.98) !important;
+        background: #7dd3fc !important;
+      }
+
+      #${EXPORTER_ID} input[type="checkbox"]:checked::after {
+        opacity: 1 !important;
+      }
+
+      #${EXPORTER_ID} input[type="radio"] {
+        border-radius: 50% !important;
+      }
+
+      #${EXPORTER_ID} input[type="radio"]:checked {
+        border-color: rgba(125, 211, 252, 0.98) !important;
+        background:
+          radial-gradient(circle at center, #082033 0 30%, transparent 36%),
+          #7dd3fc !important;
       }
 
       #${EXPORTER_ID} .bgd-panel {
@@ -1637,6 +3178,11 @@ ZX81`
         text-transform: uppercase !important;
         background: rgba(167, 243, 208, 0.10);
         flex-shrink: 0;
+        transition: transform 0.16s ease;
+      }
+
+      #${EXPORTER_ID} .bgd-diagnostics-button:hover {
+        transform: translateY(-1px);
       }
 
       #${EXPORTER_ID} .bgd-window-controls {
@@ -1745,13 +3291,7 @@ ZX81`
         min-width: 68px;
         overflow: hidden;
       }
-
-
-      #${EXPORTER_ID} .bgd-export-wait {
-        display: none;
-      }
-
-      #${EXPORTER_ID}.bgd-hltb-preflight-running .bgd-export-button {
+      #${EXPORTER_ID}.bgd-count-preflight-running .bgd-export-button {
         opacity: 0.72;
         cursor: wait;
       }
@@ -1913,6 +3453,40 @@ ZX81`
         gap: 0;
       }
 
+      #${EXPORTER_ID} .bgd-target-row {
+        display: flex;
+        align-items: center;
+        justify-content: flex-start;
+        gap: 8px;
+        width: 100%;
+        box-sizing: border-box;
+        padding: 5px 0 2px;
+        white-space: nowrap;
+      }
+
+      #${EXPORTER_ID} .bgd-target-label {
+        color: rgba(234, 244, 255, 0.72);
+        font-size: 12px;
+        font-weight: 800;
+      }
+
+      #${EXPORTER_ID} .bgd-target-button {
+        border: 1px solid rgba(125, 211, 252, 0.30);
+        border-radius: 7px;
+        padding: 4px 8px;
+        color: rgba(234, 244, 255, 0.78);
+        background: rgba(125, 211, 252, 0.07);
+        cursor: pointer;
+        font-size: 12px;
+        font-weight: 800;
+      }
+
+      #${EXPORTER_ID} .bgd-target-button.is-active {
+        border-color: rgba(125, 211, 252, 0.82);
+        color: #eaf6ff;
+        background: rgba(37, 99, 235, 0.40);
+      }
+
       #${EXPORTER_ID} .bgd-col-label {
         position: relative;
         font-size: 10px !important;
@@ -2015,44 +3589,6 @@ ZX81`
         white-space: nowrap;
       }
 
-      #${EXPORTER_ID} .bgd-chk input[type="checkbox"] {
-        appearance: none;
-        -webkit-appearance: none;
-        position: relative;
-        display: inline-block;
-        width: 16px;
-        height: 16px;
-        margin: 0;
-        border: 1px solid rgba(234, 244, 255, 0.58);
-        border-radius: 3px;
-        background: rgba(255, 255, 255, 0.96);
-        box-shadow: inset 0 1px 1px rgba(6, 16, 31, 0.20);
-        cursor: pointer;
-        flex-shrink: 0;
-      }
-
-      #${EXPORTER_ID} .bgd-chk input[type="checkbox"]::after {
-        content: '';
-        position: absolute;
-        left: 50%;
-        top: 45%;
-        width: 5px;
-        height: 9px;
-        border: solid #082033;
-        border-width: 0 2.5px 2.5px 0;
-        opacity: 0;
-        transform: translate(-50%, -50%) rotate(45deg);
-      }
-
-      #${EXPORTER_ID} .bgd-chk input[type="checkbox"]:checked {
-        border-color: rgba(125, 211, 252, 0.98);
-        background: #7dd3fc;
-      }
-
-      #${EXPORTER_ID} .bgd-chk input[type="checkbox"]:checked::after {
-        opacity: 1;
-      }
-
       #${EXPORTER_ID} .bgd-chk-basic {
         color: rgba(234,244,255,0.85);
         cursor: default;
@@ -2060,18 +3596,18 @@ ZX81`
       }
 
       #${EXPORTER_ID} .bgd-chk-basic input[type="checkbox"] {
-        border-color: rgba(170, 174, 184, 0.72);
-        background: #8f939b;
-        cursor: default;
+        border-color: rgba(170, 174, 184, 0.72) !important;
+        background: #8f939b !important;
+        cursor: default !important;
       }
 
       #${EXPORTER_ID} .bgd-chk-basic input[type="checkbox"]::after {
-        border-color: rgba(245, 247, 250, 0.92);
+        border-color: rgba(245, 247, 250, 0.92) !important;
       }
 
       #${EXPORTER_ID} .bgd-chk-basic input[type="checkbox"]:checked {
-        border-color: rgba(170, 174, 184, 0.72);
-        background: #8f939b;
+        border-color: rgba(170, 174, 184, 0.72) !important;
+        background: #8f939b !important;
       }
 
       #${EXPORTER_ID}.bgd-host-mobygames .bgd-chk-basic input[type="checkbox"] {
@@ -2189,57 +3725,6 @@ ZX81`
         white-space: nowrap;
       }
 
-      #${EXPORTER_ID} .bgd-converter-choice input {
-        appearance: none;
-        -webkit-appearance: none;
-        position: relative;
-        display: inline-block;
-        width: 16px;
-        height: 16px;
-        margin: 0;
-        border: 1px solid rgba(234, 244, 255, 0.58);
-        background: rgba(255, 255, 255, 0.96);
-        box-shadow: inset 0 1px 1px rgba(6, 16, 31, 0.20);
-        flex-shrink: 0;
-      }
-
-      #${EXPORTER_ID} .bgd-converter-choice input[type="radio"] {
-        border-radius: 50%;
-      }
-
-      #${EXPORTER_ID} .bgd-converter-choice input[type="checkbox"] {
-        border-radius: 3px;
-      }
-
-      #${EXPORTER_ID} .bgd-converter-choice input[type="radio"]:checked {
-        border-color: rgba(125, 211, 252, 0.98);
-        background:
-          radial-gradient(circle at center, #1a3a52 0 26%, transparent 32%),
-          #7dd3fc;
-      }
-
-      #${EXPORTER_ID} .bgd-converter-choice input[type="checkbox"]::after {
-        content: '';
-        position: absolute;
-        left: 50%;
-        top: 45%;
-        width: 5px;
-        height: 9px;
-        border: solid #082033;
-        border-width: 0 2.5px 2.5px 0;
-        opacity: 0;
-        transform: translate(-50%, -50%) rotate(45deg);
-      }
-
-      #${EXPORTER_ID} .bgd-converter-choice input[type="checkbox"]:checked {
-        border-color: rgba(125, 211, 252, 0.98);
-        background: #7dd3fc;
-      }
-
-      #${EXPORTER_ID} .bgd-converter-choice input[type="checkbox"]:checked::after {
-        opacity: 1;
-      }
-
       #${EXPORTER_ID} .bgd-converter-choice:has(input:disabled) {
         opacity: 0.52;
         cursor: default;
@@ -2254,43 +3739,6 @@ ZX81`
         font-size: 12px;
         font-weight: 800;
         white-space: nowrap;
-      }
-
-      #${EXPORTER_ID} .bgd-converter-inline-option input[type="checkbox"] {
-        appearance: none;
-        -webkit-appearance: none;
-        position: relative;
-        display: inline-block;
-        width: 16px;
-        height: 16px;
-        margin: 0;
-        border: 1px solid rgba(234, 244, 255, 0.58);
-        border-radius: 3px;
-        background: rgba(255, 255, 255, 0.96);
-        box-shadow: inset 0 1px 1px rgba(6, 16, 31, 0.20);
-        flex-shrink: 0;
-      }
-
-      #${EXPORTER_ID} .bgd-converter-inline-option input[type="checkbox"]::after {
-        content: '';
-        position: absolute;
-        left: 50%;
-        top: 45%;
-        width: 5px;
-        height: 9px;
-        border: solid #082033;
-        border-width: 0 2.5px 2.5px 0;
-        opacity: 0;
-        transform: translate(-50%, -50%) rotate(45deg);
-      }
-
-      #${EXPORTER_ID} .bgd-converter-inline-option input[type="checkbox"]:checked {
-        border-color: rgba(125, 211, 252, 0.98);
-        background: #7dd3fc;
-      }
-
-      #${EXPORTER_ID} .bgd-converter-inline-option input[type="checkbox"]:checked::after {
-        opacity: 1;
       }
 
       #${EXPORTER_ID} .bgd-converter-inline-option:has(input:disabled) {
@@ -2550,11 +3998,193 @@ ZX81`
       }
 
       #${EXPORTER_ID} .bgd-status-config-head {
+        display: grid;
+        grid-template-columns: minmax(180px, 1fr) minmax(180px, 1fr);
+        align-items: center;
+        gap: 12px;
+        margin-bottom: 3px;
+      }
+
+      #${EXPORTER_ID} .bgd-request-rate-section {
+        position: absolute;
+        top: 8px;
+        left: 50%;
+        z-index: 1;
+        width: max-content;
+        max-width: 100%;
+        transform: translateX(-50%);
+      }
+
+      #${EXPORTER_ID} .bgd-status-config-utility-row {
+        display: flex;
+        align-items: flex-end;
+        min-height: 28px;
+        margin-bottom: 6px;
+      }
+
+      #${EXPORTER_ID} .bgd-request-rate-heading {
+        display: flex;
+        align-items: baseline;
+        justify-content: center;
+        gap: 8px;
+        margin-bottom: 4px;
+        color: #b9e6ff;
+        font-size: 13px;
+        font-weight: 900;
+        letter-spacing: 0.08em;
+        text-align: center;
+        text-transform: uppercase;
+      }
+
+      #${EXPORTER_ID} .bgd-request-rate-conversion {
+        color: rgba(234, 244, 255, 0.52);
+        font-size: 9px;
+        font-weight: 700;
+        letter-spacing: 0;
+        text-transform: none;
+        white-space: nowrap;
+      }
+
+      #${EXPORTER_ID} .bgd-request-delay-control {
+        display: grid;
+        grid-template-columns: auto 1px auto auto;
+        grid-template-rows: 15px 15px;
+        align-items: center;
+        justify-content: center;
+        width: max-content;
+        max-width: 100%;
+        gap: 2px 8px;
+        min-width: 0;
+        padding: 5px 8px;
+        border: 1px solid rgba(125, 211, 252, 0.28);
+        border-radius: 9px;
+        background: linear-gradient(180deg, rgba(125, 211, 252, 0.09), rgba(125, 211, 252, 0.045));
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+      }
+
+      #${EXPORTER_ID} .bgd-request-delay-reset {
+        grid-column: 4;
+        grid-row: 1 / 3;
+        border: 1px solid rgba(167, 243, 208, 0.34);
+        border-radius: 6px;
+        width: 23px;
+        height: 23px;
+        padding: 0;
+        color: rgba(167, 243, 208, 0.94);
+        background: rgba(167, 243, 208, 0.09);
+        cursor: pointer;
+        font-size: 13px;
+        font-weight: 900;
+        line-height: 1;
+      }
+
+      #${EXPORTER_ID} .bgd-request-delay-inputs {
+        grid-column: 1;
+        grid-row: 1 / 3;
         display: flex;
         align-items: center;
-        justify-content: space-between;
-        gap: 12px;
-        margin-bottom: 12px;
+        place-self: center;
+        gap: 5px;
+      }
+
+      #${EXPORTER_ID} .bgd-request-delay-field {
+        display: inline-flex;
+        align-items: center;
+        gap: 3px;
+        min-width: 0;
+        color: rgba(234, 244, 255, 0.68);
+        font-size: 9px;
+        font-weight: 800;
+      }
+
+      #${EXPORTER_ID} .bgd-request-delay-field > span:first-child {
+        color: rgba(234, 244, 255, 0.62);
+        white-space: nowrap;
+      }
+
+      #${EXPORTER_ID} .bgd-request-delay-input {
+        box-sizing: border-box;
+        width: 43px;
+        height: 23px;
+        border: 1px solid rgba(125, 211, 252, 0.34);
+        border-radius: 6px;
+        padding: 2px 4px;
+        color: #eaf4ff;
+        background: rgba(6, 12, 24, 0.72);
+        font-size: 10px;
+        font-weight: 800;
+        text-align: right;
+      }
+
+      #${EXPORTER_ID} .bgd-request-pages-value .bgd-request-delay-input {
+        width: 28px;
+        text-align: center;
+      }
+
+      #${EXPORTER_ID} .bgd-request-delay-divider {
+        grid-column: 2;
+        grid-row: 1 / 3;
+        width: 1px;
+        height: 30px;
+        background: rgba(125, 211, 252, 0.22);
+      }
+
+      #${EXPORTER_ID} .bgd-request-delay-input:focus {
+        border-color: rgba(125, 211, 252, 0.78);
+        outline: none;
+        box-shadow: 0 0 0 2px rgba(47, 141, 247, 0.16);
+      }
+
+      #${EXPORTER_ID} .bgd-request-delay-input::-webkit-inner-spin-button,
+      #${EXPORTER_ID} .bgd-request-delay-input::-webkit-outer-spin-button {
+        margin: 0;
+        appearance: none;
+        -webkit-appearance: none;
+      }
+
+      #${EXPORTER_ID} .bgd-request-delay-input[type="number"] {
+        appearance: textfield;
+        -moz-appearance: textfield;
+      }
+
+      #${EXPORTER_ID} .bgd-request-delay-note {
+        color: rgba(234, 244, 255, 0.52);
+        font-size: 9px;
+        white-space: nowrap;
+      }
+
+      #${EXPORTER_ID} .bgd-request-pages-control {
+        grid-column: 3;
+        grid-row: 1 / 3;
+        display: grid;
+        grid-template-columns: auto auto;
+        grid-template-rows: 15px 15px;
+        align-items: center;
+        align-self: center;
+        gap: 2px 5px;
+      }
+
+      #${EXPORTER_ID} .bgd-request-pages-label,
+      #${EXPORTER_ID} .bgd-request-pages-note {
+        grid-column: 2;
+        color: rgba(234, 244, 255, 0.68);
+        font-size: 9px;
+        font-weight: 800;
+        line-height: 1;
+        white-space: nowrap;
+      }
+
+      #${EXPORTER_ID} .bgd-request-pages-note {
+        grid-row: 2;
+        color: rgba(234, 244, 255, 0.52);
+      }
+
+      #${EXPORTER_ID} .bgd-request-pages-value {
+        grid-column: 1;
+        grid-row: 1 / 3;
+        display: flex;
+        align-items: center;
+        place-self: center;
       }
 
       #${EXPORTER_ID} .bgd-status-config-title strong {
@@ -2568,7 +4198,7 @@ ZX81`
 
       #${EXPORTER_ID} .bgd-status-config-title span {
         display: block;
-        margin-top: 3px;
+        margin-top: 1px;
         color: rgba(234, 244, 255, 0.66);
         font-size: 12px;
       }
@@ -2580,11 +4210,32 @@ ZX81`
         font-weight: 700;
       }
 
+      #${EXPORTER_ID} .bgd-status-config-utility-row .bgd-status-config-tip {
+        margin: 0;
+      }
+
       #${EXPORTER_ID} .bgd-status-config-buttons {
         display: flex;
+        flex-direction: row;
         align-items: stretch;
+        justify-content: flex-end;
         gap: 8px;
         flex-shrink: 0;
+        align-self: start;
+      }
+
+      @media (max-width: 760px) {
+        #${EXPORTER_ID} .bgd-status-config-head {
+          grid-template-columns: 1fr auto;
+        }
+
+        #${EXPORTER_ID} .bgd-status-config-utility-row {
+          margin-bottom: 70px;
+        }
+
+        #${EXPORTER_ID} .bgd-request-rate-section {
+          top: 58px;
+        }
       }
 
       #${EXPORTER_ID} .bgd-status-config-small {
@@ -2599,10 +4250,49 @@ ZX81`
       }
 
       #${EXPORTER_ID} .bgd-status-config-x {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
         min-width: 34px;
         width: 34px;
-        padding-left: 0;
-        padding-right: 0;
+        height: 34px;
+        padding: 0;
+        box-sizing: border-box;
+        line-height: 1;
+        text-align: center;
+      }
+
+      #${EXPORTER_ID} .bgd-status-config-tooltip-wrap {
+        position: relative;
+        display: flex;
+      }
+
+      #${EXPORTER_ID} .bgd-status-config-tooltip {
+        position: absolute;
+        z-index: 100004;
+        right: 0;
+        top: calc(100% + 7px);
+        width: max-content;
+        max-width: 230px;
+        padding: 6px 8px;
+        border: 1px solid rgba(125, 211, 252, 0.38);
+        border-radius: 7px;
+        color: #eaf4ff;
+        background: rgba(10, 16, 30, 0.98);
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.38);
+        font-size: 11px;
+        font-weight: 700;
+        line-height: 1.3;
+        opacity: 0;
+        pointer-events: none;
+        transform: translateY(3px);
+        transition: opacity 120ms ease, transform 120ms ease;
+      }
+
+      #${EXPORTER_ID} .bgd-status-config-tooltip-wrap:hover .bgd-status-config-tooltip,
+      #${EXPORTER_ID} .bgd-status-config-tooltip-wrap:focus-within .bgd-status-config-tooltip {
+        opacity: 1;
+        transform: translateY(0);
       }
 
       #${EXPORTER_ID} .bgd-status-config-grid {
@@ -2663,6 +4353,19 @@ ZX81`
         line-height: 1;
         white-space: nowrap;
         background: rgba(167, 243, 208, 0.10);
+      }
+
+      #${EXPORTER_ID} .bgd-status-add-icon {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        margin-right: 6px;
+        color: #b7ffe0;
+        font-size: 17px;
+        font-weight: 900;
+        line-height: 1;
+        text-shadow: 0 0 7px rgba(167, 243, 208, 0.52);
+        transform: translateY(-1px);
       }
 
       #${EXPORTER_ID} .bgd-status-category-actions button:disabled {
@@ -2873,57 +4576,6 @@ ZX81`
         cursor: pointer;
       }
 
-      #${EXPORTER_ID} .bgd-source-choice input {
-        appearance: none;
-        -webkit-appearance: none;
-        position: relative;
-        display: inline-block;
-        width: 16px;
-        height: 16px;
-        margin: 0;
-        border: 1px solid rgba(234, 244, 255, 0.58);
-        background: rgba(255, 255, 255, 0.96);
-        box-shadow: inset 0 1px 1px rgba(6, 16, 31, 0.20);
-        flex-shrink: 0;
-      }
-
-      #${EXPORTER_ID} .bgd-source-choice input[type="radio"] {
-        border-radius: 50%;
-      }
-
-      #${EXPORTER_ID} .bgd-source-choice input[type="checkbox"] {
-        border-radius: 3px;
-      }
-
-      #${EXPORTER_ID} .bgd-source-choice input[type="radio"]:checked {
-        border-color: rgba(125, 211, 252, 0.98);
-        background:
-          radial-gradient(circle at center, #082033 0 34%, transparent 38%),
-          #7dd3fc;
-      }
-
-      #${EXPORTER_ID} .bgd-source-choice input[type="checkbox"]::after {
-        content: '';
-        position: absolute;
-        left: 4px;
-        top: 1px;
-        width: 5px;
-        height: 9px;
-        border: solid #082033;
-        border-width: 0 3px 3px 0;
-        opacity: 0;
-        transform: rotate(45deg);
-      }
-
-      #${EXPORTER_ID} .bgd-source-choice input[type="checkbox"]:checked {
-        border-color: rgba(125, 211, 252, 0.98);
-        background: #7dd3fc;
-      }
-
-      #${EXPORTER_ID} .bgd-source-choice input[type="checkbox"]:checked::after {
-        opacity: 1;
-      }
-
       #${EXPORTER_ID} .bgd-source-message {
         margin: 8px 0 10px;
         color: rgba(253, 224, 71, 0.92);
@@ -2957,6 +4609,23 @@ ZX81`
         line-height: 1.35;
       }
 
+      #${EXPORTER_ID} .bgd-notice {
+        margin: 8px 12px 0;
+        padding: 8px 10px;
+        border: 1px solid rgba(125, 211, 252, 0.45);
+        border-radius: 8px;
+        color: #eaf4ff;
+        background: rgba(14, 55, 78, 0.96);
+        font-size: 12px;
+        font-weight: 800;
+        line-height: 1.35;
+      }
+
+      #${EXPORTER_ID} .bgd-notice.is-error {
+        border-color: rgba(248, 113, 113, 0.62);
+        background: rgba(91, 22, 31, 0.97);
+      }
+
       @media (max-width: 760px) {
         #${EXPORTER_ID} .bgd-status-config-grid {
           grid-template-columns: 1fr;
@@ -2977,6 +4646,7 @@ ZX81`
   function createPanel() {
     injectStyles();
     const sourceUi = getSourceUiDescriptorForHost();
+    const targetOptions = Array.isArray(sourceUi.targetOptions) ? sourceUi.targetOptions : [];
     const root = document.createElement('div');
     root.id = EXPORTER_ID;
     root.className = sourceUi.hostClass || '';
@@ -2987,7 +4657,7 @@ ZX81`
             <div class="bgd-title">
               <strong>Library Export</strong>
               <div class="bgd-title-meta">
-                <span>/u/${escapeHtml(userSlug)}</span>
+                <span>${escapeHtml(isIgdbHost() ? `/users/${userSlug}` : isVndbHost() ? `/u/${getVndbDisplayName() || userSlug}` : isMobyGamesHost() ? `/u/${getMobyGamesDisplayNameFromDocument() || userSlug}` : isGameFaqsHost() ? userSlug : `/u/${userSlug}`)}</span>
               </div>
             </div>
             <div class="bgd-window-controls">
@@ -2996,7 +4666,7 @@ ZX81`
               <button class="bgd-minimize-button" type="button" id="bgdMinimizeBtn" title="Minimize exporter" aria-label="Minimize exporter"><svg class="bgd-btn-icon" viewBox="0 0 10 10" aria-hidden="true" focusable="false"><line x1="1" y1="5" x2="9" y2="5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></button>
             </div>
           </div>
-          <span class="bgd-version-notice" id="bgdVersionNotice">UPDATE AVAILABLE!</span>
+          <span class="bgd-version-notice" id="bgdVersionNotice">NEW VERSION!</span>
           <div class="bgd-actions">
             <div class="bgd-checks">
               <div class="bgd-checks-row">
@@ -3008,9 +4678,8 @@ ZX81`
                         <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82A7.64 7.64 0 0 1 8 3.87c.68 0 1.36.09 2 .26 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"></path>
                       </svg>
                     </a>
-                    ${sourceUi.hasStatusConfiguration ? '<button class="bgd-config-button" type="button" id="bgdConfigBtn" title="Open status pill configuration" aria-label="Open status pill configuration">⚙️</button>' : ''}
+                    ${sourceUi.hasStatusConfiguration ? '<button class="bgd-config-button" type="button" id="bgdConfigBtn" aria-label="Open status pill configuration">⚙️</button>' : ''}
                     <button class="bgd-export-button" type="button" id="bgdExportBtn">Export</button>
-                    <div class="bgd-export-wait" id="bgdExportWait" aria-live="polite">WAIT</div>
                     <div class="bgd-run-controls" id="bgdRunControls" hidden>
                       <button class="bgd-run-control-button bgd-run-control-toggle" type="button" id="bgdPauseExportBtn" title="Pause export" aria-label="Pause export"><span class="bgd-run-icon bgd-run-icon-pause" aria-hidden="true"></span><span class="bgd-run-icon bgd-run-icon-play" aria-hidden="true"></span></button>
                       <button class="bgd-run-control-button" type="button" id="bgdStopExportBtn" title="Stop export" aria-label="Stop export"><span class="bgd-run-icon bgd-run-icon-stop" aria-hidden="true"></span></button>
@@ -3032,7 +4701,7 @@ ZX81`
                 <div class="bgd-chk-items bgd-tag-lines">
                   <div class="bgd-tag-line">
                     <label class="bgd-chk bgd-chk-basic"><input type="checkbox" checked disabled> Basic</label>
-                    <label class="bgd-chk bgd-chk-opt"><input type="checkbox" id="bgdChkGenres"> ${escapeHtml(sourceUi.metadataLabel || 'Genres')}</label>
+                    ${sourceUi.metadataOption === false ? '' : `<label class="bgd-chk bgd-chk-opt"><input type="checkbox" id="bgdChkGenres"> ${escapeHtml(sourceUi.metadataLabel || 'Genres')}</label>`}
                     <label class="bgd-chk bgd-chk-opt"><input type="checkbox" id="bgdChkOfflineCovers"> Offline Covers</label>
                   </div>
                   ${sourceUi.platformOptions ? `<div class="bgd-tag-line">
@@ -3041,6 +4710,15 @@ ZX81`
                   </div>` : ''}
                 </div>
               </div>
+              ${targetOptions.length ? `
+                <div class="bgd-target-row">
+                  <span class="bgd-target-label">${isBackloggdHost() ? 'Extract Target:' : 'Export Target:'}</span>
+                  ${targetOptions.map(target => {
+                    const isActive = target.isActive();
+                    return `<button class="bgd-target-button${isActive ? ' is-active' : ''}" type="button" data-bgd-target="${escapeHtml(target.id)}" aria-pressed="${isActive ? 'true' : 'false'}">${escapeHtml(target.label)}</button>`;
+                  }).join('')}
+                </div>
+              ` : ''}
             </div>
           </div>
         </div>
@@ -3097,9 +4775,110 @@ ZX81`
   chkOfflineCovers = panel.querySelector('#bgdChkOfflineCovers');
   chkPlatforms   = panel.querySelector('#bgdChkPlatforms');
   chkPlatforms226 = panel.querySelector('#bgdChkPlatforms226');
+  targetButtons    = [...panel.querySelectorAll('[data-bgd-target]')];
   log            = panel.querySelector('.bgd-log');
   fill           = panel.querySelector('.bgd-fill');
   logUpdateLines = new Map();
+
+  function activateModalAccessibility(modal, { label, onEscape, initialFocus } = {}) {
+    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    modal.setAttribute('role', 'dialog');
+    modal.setAttribute('aria-modal', 'true');
+    modal.setAttribute('aria-label', label || 'Dialog');
+    modal.tabIndex = -1;
+    const focusableSelector = 'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])';
+    const onKeyDown = event => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        if (onEscape) onEscape();
+        return;
+      }
+      if (event.key !== 'Tab') return;
+      const focusable = [...modal.querySelectorAll(focusableSelector)].filter(element => !element.hidden);
+      if (!focusable.length) {
+        event.preventDefault();
+        modal.focus();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    modal.addEventListener('keydown', onKeyDown);
+    let cleaned = false;
+    modal.__bgdDialogCleanup = () => {
+      if (cleaned) return;
+      cleaned = true;
+      modal.removeEventListener('keydown', onKeyDown);
+      if (previousFocus && document.contains(previousFocus)) previousFocus.focus();
+    };
+    requestAnimationFrame(() => {
+      const target = initialFocus || modal.querySelector(focusableSelector) || modal;
+      if (document.contains(modal)) target.focus();
+    });
+    return modal.__bgdDialogCleanup;
+  }
+
+  function guardSourceActionClick(event) {
+    if (!redirectToSourceActionPageIfNeeded()) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+  }
+  if (exportBtn) exportBtn.addEventListener('click', guardSourceActionClick, true);
+  if (configBtn) configBtn.addEventListener('click', guardSourceActionClick, true);
+
+  const panelTargetOptions = getSourceUiDescriptorForHost().targetOptions;
+  targetButtons.forEach(button => {
+    button.addEventListener('click', () => {
+      const target = panelTargetOptions.find(option => option.id === button.dataset.bgdTarget);
+      if (!target || target.isActive()) return;
+      const href = target.href();
+      if (!href) return;
+      if (isIgdbHost()) {
+        igdbTargetOverride = target.id;
+        clearIgdbTemporaryScrapeState();
+      }
+      targetButtons.forEach(candidate => {
+        const isActive = candidate === button;
+        candidate.classList.toggle('is-active', isActive);
+        candidate.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+      });
+      if (isIgdbHost()) {
+        const currentUrl = new URL(location.href);
+        const targetUrl = new URL(href, location.origin);
+        const sameDocumentTarget = currentUrl.origin === targetUrl.origin
+          && currentUrl.pathname === targetUrl.pathname
+          && currentUrl.search === targetUrl.search;
+        if (sameDocumentTarget) {
+          history.replaceState(history.state, '', targetUrl.href);
+          location.reload();
+          return;
+        }
+      }
+      location.href = href;
+      if (isIgdbHost()) {
+        setTimeout(() => {
+          statusPillConfig = loadStatusPillConfig();
+          activeStatusPillConfigStorageKey = getSourceStatusConfigDescriptorForHost()?.storageKey || '';
+          cleanupPanel();
+          onNavigate();
+        }, 0);
+      }
+    });
+  });
+  syncExportTargetButtons();
+
+  function getPanelMinimizedStorageKey() {
+    const sourceId = getSourceDescriptorForHost().id || DEFAULT_SOURCE_ID;
+    const targetId = sourceId === 'backloggd' ? getBackloggdTargetAdapter().id : '';
+    return `bgdExporterMinimized:${sourceId}${targetId ? `:${targetId}` : ''}`;
+  }
 
   function setPanelMinimized(isMinimized) {
     if (!panel || (!minimizeBtn && !restoreBtn)) return;
@@ -3116,17 +4895,17 @@ ZX81`
       restoreBtn.title = isMinimized ? 'Expand exporter' : 'Minimize exporter';
       restoreBtn.setAttribute('aria-label', restoreBtn.title);
     }
-    storageSet('bgdExporterMinimized', isMinimized ? '1' : '0');
+    storageSet(getPanelMinimizedStorageKey(), isMinimized ? '1' : '0');
   }
 
   if (minimizeBtn) {
-    setPanelMinimized(storageGet('bgdExporterMinimized', '0') === '1');
+    setPanelMinimized(storageGet(getPanelMinimizedStorageKey(), '0') === '1');
     minimizeBtn.addEventListener('click', () => {
       setPanelMinimized(!panel.classList.contains('is-minimized'));
     });
   }
   if (restoreBtn) {
-    if (!minimizeBtn) setPanelMinimized(storageGet('bgdExporterMinimized', '0') === '1');
+    if (!minimizeBtn) setPanelMinimized(storageGet(getPanelMinimizedStorageKey(), '0') === '1');
     restoreBtn.addEventListener('click', () => {
       setPanelMinimized(!panel.classList.contains('is-minimized'));
     });
@@ -3149,8 +4928,14 @@ ZX81`
       }
     }
   }
-  if (chkPlatforms) chkPlatforms.addEventListener('change', () => enforcePlatformScanCheckboxes('basic'));
-  if (chkPlatforms226) chkPlatforms226.addEventListener('change', () => enforcePlatformScanCheckboxes('full'));
+  if (chkPlatforms) chkPlatforms.addEventListener('change', () => {
+    enforcePlatformScanCheckboxes('basic');
+    renderScrapeSelectionSummary();
+  });
+  if (chkPlatforms226) chkPlatforms226.addEventListener('change', () => {
+    enforcePlatformScanCheckboxes('full');
+    renderScrapeSelectionSummary();
+  });
 
   function getSelectedFileFormats() {
     return {
@@ -3240,7 +5025,11 @@ ZX81`
     syncHowLongToBeatOfflineCoverOption();
   })();
 
-  if (chkGenres) chkGenres.addEventListener('change', syncHowLongToBeatOfflineCoverOption);
+  if (chkGenres) chkGenres.addEventListener('change', () => {
+    syncHowLongToBeatOfflineCoverOption();
+    renderScrapeSelectionSummary();
+  });
+  if (chkOfflineCovers) chkOfflineCovers.addEventListener('change', renderScrapeSelectionSummary);
 
   [chkCsv, chkJson, chkHtml].forEach(el => {
     if (el) el.addEventListener('change', () => {
@@ -3303,10 +5092,25 @@ ZX81`
     return source;
   }
 
+  function resetStatusPillConfigCounts(config) {
+    (config && Array.isArray(config.categories) ? config.categories : []).forEach(category => {
+      (category.pills || []).forEach(pill => {
+        if (!pill || pill.kind !== 'status') return;
+        pill.collections = normalizeStatusPillCollections(pill.collections).map(collection => ({
+          ...collection,
+          games: 0,
+        }));
+      });
+    });
+    return config;
+  }
+
   configureSourceDescriptor('mobygames', {
     statusConfig: {
       discoverCollections: fetchMobyGamesPublicCollections,
       defaultConfigFromCollections: makeDefaultStatusPillConfig,
+      buildDefaultConfig: () => makeDefaultStatusPillConfig(),
+      syncDefaultCounts: collections => syncConfiguredCollectionCounts(collections),
       storageKey: STATUS_PILL_CONFIG_STORAGE_KEY,
     },
   });
@@ -3351,14 +5155,6 @@ ZX81`
     };
   }
 
-  function getHowLongToBeatCategoryUrl(name, page = 1, username = getHowLongToBeatUserSlug()) {
-    if (!username) return '';
-    const defaultRoute = HLTB_DEFAULT_CATEGORY_ROUTES.find(entry =>
-      entry.name.toLowerCase() === normalizeHowLongToBeatCategoryName(name).toLowerCase()
-    );
-    return getHowLongToBeatCategoryUrlFromRoute(defaultRoute ? defaultRoute.route : makeHowLongToBeatCategorySlug(name), page, username);
-  }
-
   function getHowLongToBeatDetectedCustomCategoryNames(doc = document) {
     return [...doc.querySelectorAll('li')]
       .filter(li => {
@@ -3391,11 +5187,77 @@ ZX81`
     return categories;
   }
 
+  function makeDefaultVndbStatusPillConfig() {
+    const currentCounts = new Map(getVndbLabelCollections(document).map(collection => [collection.name, collection.games]));
+    const status = (id, label, color, sourceLabel) => ({
+      id,
+      kind: 'status',
+      label,
+      color,
+      source: { type: 'status', value: id },
+      collections: [{ name: sourceLabel, games: currentCounts.get(sourceLabel) || 0, url: `vndb-label:${sourceLabel}` }],
+    });
+    return {
+      categories: [
+        {
+          id: 'vndb-group-1',
+          label: 'Group 1',
+          pills: [
+            status('vndb-finished', 'Finished', '#16a34a', 'Finished'),
+            status('vndb-dropped', 'Dropped', '#dc2626', 'Dropped'),
+            status('vndb-blacklist', 'Blacklist', '#475569', 'Blacklist'),
+          ],
+        },
+        {
+          id: 'vndb-group-2',
+          label: 'Group 2',
+          pills: [
+            status('vndb-playing', 'Playing', '#2563eb', 'Playing'),
+            status('vndb-stall', 'Stall', '#db2777', 'Stall'),
+            status('vndb-backlog', 'Backlog', '#92400e', 'No Label'),
+          ],
+        },
+        {
+          id: 'vndb-group-3',
+          label: 'Group 3',
+          pills: [
+            { id: 'vndb-wishlist-total', kind: 'aggregate', label: 'Wishlist Total', sources: ['vndb-wishlist-low', 'vndb-wishlist-medium', 'vndb-wishlist-high'] },
+            status('vndb-wishlist-low', 'Wishlist Low', '#0d9488', 'Wishlist Low'),
+            status('vndb-wishlist-medium', 'Wishlist Medium', '#7c3aed', 'Wishlist Medium'),
+            status('vndb-wishlist-high', 'Wishlist High', '#ea580c', 'Wishlist High'),
+          ],
+        },
+      ],
+    };
+  }
+
+  function parseHowLongToBeatUserDataCategories(doc = document, username = getHowLongToBeatUserSlug()) {
+    const nextData = getHowLongToBeatNextData(doc);
+    const userData = nextData && nextData.props && nextData.props.pageProps && nextData.props.pageProps.userData;
+    if (!userData || !username) return [];
+    const definitions = [
+      { name: 'Playing', count: userData.stats_playing, route: 'playing' },
+      { name: 'Backlog', count: userData.stats_backlog, route: 'backlog' },
+      { name: 'Replays', count: userData.stats_replays, route: 'replays' },
+      { name: userData.set_customtab || 'Custom', count: userData.stats_custom, route: 'custom' },
+      { name: userData.set_customtab2 || 'Custom 2', count: userData.stats_custom2, route: 'custom2' },
+      { name: userData.set_customtab3 || 'Custom 3', count: userData.stats_custom3, route: 'custom3' },
+      { name: 'Completed', count: userData.stats_completed, route: 'completed' },
+      { name: 'Retired', count: userData.stats_retired, route: 'retired' },
+    ];
+    return definitions.map(entry => normalizeHowLongToBeatCategory({
+      name: entry.name,
+      games: entry.count,
+      url: getHowLongToBeatCategoryUrlFromRoute(entry.route, 1, username),
+    })).filter(Boolean);
+  }
+
   function parseHowLongToBeatCategoriesDocument(doc = document) {
     const username = doc === document && isHowLongToBeatHost()
       ? getHowLongToBeatUserSlug()
       : 'tester';
-    const categories = buildHowLongToBeatKnownCategories(username || 'tester', doc);
+    const categories = parseHowLongToBeatUserDataCategories(doc, username || 'tester');
+    if (!categories.length) categories.push(...buildHowLongToBeatKnownCategories(username || 'tester', doc));
     const byUrl = new Map();
     categories.forEach(category => byUrl.set(category.url, category));
     return [...byUrl.values()];
@@ -3405,13 +5267,741 @@ ZX81`
     return hltbPreflightCategories || parseHowLongToBeatCategoriesDocument(document);
   }
 
+  function parseHowLongToBeatListCollectionsDocument(doc = document, pageUrl = location.href) {
+    const username = getHowLongToBeatUserSlug(pageUrl);
+    if (!username) return [];
+    const rootPath = `/user/${encodeURIComponent(username)}/lists`;
+    const collections = [];
+
+    function firstValue(object, keys) {
+      for (const key of keys) {
+        const value = object && object[key];
+        if (value != null && value !== '') return value;
+      }
+      return '';
+    }
+
+    function addStructuredCollection(entry) {
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return;
+      const name = normalizeHowLongToBeatCategoryName(firstValue(entry, [
+        'list_name', 'listName', 'collection_name', 'collectionName', 'title', 'name',
+      ]));
+      const id = firstValue(entry, ['list_id', 'listId', 'collection_id', 'collectionId', 'id']);
+      const rawUrl = firstValue(entry, ['list_url', 'listUrl', 'collection_url', 'collectionUrl', 'url', 'href']);
+      let gamesValue = 0;
+      let addonsValue = 0;
+      const countObjects = [entry, entry.stats, entry.counts, entry.statistics, entry.summary].filter(value =>
+        value && typeof value === 'object' && !Array.isArray(value)
+      );
+      countObjects.forEach(object => {
+        Object.entries(object).forEach(([key, rawValue]) => {
+          const value = Number(String(rawValue).replace(/,/g, ''));
+          if (!Number.isFinite(value) || value < 0) return;
+          const normalizedKey = key.toLowerCase().replace(/[^a-z0-9]/g, '');
+          if (/^(?:games?|maingames?|gamecount|gamescount|countgames?|totalgames?|totalgamecount|totalgamescount)$/.test(normalizedKey)) {
+            gamesValue = Math.max(gamesValue, value);
+          } else if (/^(?:addons?|addons?count|countaddons?|dlc|dlcs|dlccount|countdlc|totaladdons?|totaladdoncount)$/.test(normalizedKey)) {
+            addonsValue = Math.max(addonsValue, value);
+          }
+        });
+      });
+      if (!name || (!id && !rawUrl) || (!gamesValue && !addonsValue && !/list|collection/i.test(Object.keys(entry).join(' ')))) return;
+      const url = rawUrl
+        ? new URL(String(rawUrl), pageUrl)
+        : new URL(`${rootPath}/${encodeURIComponent(String(id))}/${encodeURIComponent(name)}`, pageUrl);
+      collections.push({ name, games: gamesValue + addonsValue, url: url.href });
+    }
+
+    const nextData = getHowLongToBeatNextData(doc);
+    const seenObjects = new Set();
+    function visit(value, depth = 0) {
+      if (!value || typeof value !== 'object' || depth > 12 || seenObjects.has(value)) return;
+      seenObjects.add(value);
+      if (Array.isArray(value)) {
+        value.forEach(entry => visit(entry, depth + 1));
+        return;
+      }
+      addStructuredCollection(value);
+      Object.values(value).forEach(entry => visit(entry, depth + 1));
+    }
+    visit(nextData);
+
+    doc.querySelectorAll('a[href]').forEach(link => {
+      const href = String(link.getAttribute('href') || '').trim();
+      const url = new URL(href, pageUrl);
+      const cleanPath = url.pathname.replace(/\/+$/, '');
+      const isCollectionLink = cleanPath.toLowerCase().startsWith(`${rootPath.toLowerCase()}/`)
+        || (cleanPath.toLowerCase() === rootPath.toLowerCase() && !!url.search)
+        || /\/list\/\d+|\/lists\/\d+|\/collection\/\d+/i.test(cleanPath);
+      if (!isCollectionLink) return;
+      const container = link.closest('li, article, section, [class*="card"], [class*="list"]') || link.parentElement;
+      const text = normalizeHowLongToBeatCategoryName(container?.textContent || link.textContent);
+      const name = normalizeHowLongToBeatCategoryName(
+        link.getAttribute('title')
+        || link.querySelector('h1, h2, h3, h4, h5, strong, [class*="title"]')?.textContent
+        || link.textContent
+      );
+      if (!name) return;
+      function countForLabels(labels) {
+        for (const label of labels) {
+          const after = text.match(new RegExp(`([\\d,]+)\\s*(?:${label})\\b`, 'i'));
+          if (after) return Number(after[1].replace(/,/g, ''));
+          const before = text.match(new RegExp(`(?:${label})\\s*[:\\-]?\\s*([\\d,]+)`, 'i'));
+          if (before) return Number(before[1].replace(/,/g, ''));
+        }
+        return 0;
+      }
+      const games = countForLabels(['games?', 'main\\s+games?'])
+        + countForLabels(['add-?ons?', 'dlcs?']);
+      collections.push({ name, games, url: url.href });
+    });
+    const byUrl = new Map();
+    collections.forEach(collection => {
+      const existing = byUrl.get(collection.url);
+      if (!existing || collection.games > existing.games) byUrl.set(collection.url, collection);
+    });
+    return [...byUrl.values()];
+  }
+
+  async function fetchHowLongToBeatListCollections({ force = false } = {}) {
+    if (!force && hltbListCollectionsCache && hltbListCollectionsCache.length) return hltbListCollectionsCache;
+    if (!force && hltbListCollectionsPromise) return hltbListCollectionsPromise;
+    const username = getHowLongToBeatUserSlug();
+    if (!username) return [];
+    hltbListCollectionsPromise = (async () => {
+      const pageUrl = `https://howlongtobeat.com/user/${encodeURIComponent(username)}/lists`;
+      let collections = isHowLongToBeatCollectionsTarget()
+        ? parseHowLongToBeatListCollectionsDocument(document, pageUrl)
+        : [];
+      if (!collections.length) {
+        const html = await fetchHtml(pageUrl, { maxAttempts: 3, timeoutMs: 30000 });
+        collections = parseHowLongToBeatListCollectionsDocument(new DOMParser().parseFromString(html, 'text/html'), pageUrl);
+      }
+      hltbListCollectionsCache = collections;
+      return collections;
+    })().finally(() => {
+      hltbListCollectionsPromise = null;
+    });
+    return hltbListCollectionsPromise;
+  }
+
+  async function prefetchHowLongToBeatListCollections() {
+    try {
+      return await fetchHowLongToBeatListCollections();
+    } catch (error) {
+      console.error('Could not preload HowLongToBeat collections.', error);
+      return [];
+    }
+  }
+
+  function refreshHowLongToBeatCategoryNames() {
+    const detected = parseHowLongToBeatCategoriesDocument(document);
+    hltbPreflightCategories = detected;
+    syncHowLongToBeatConfigCollectionCounts(detected);
+    return hltbPreflightCategories;
+  }
+
+  function makeDefaultHowLongToBeatStatusPillConfig() {
+    const config = makeDefaultStatusPillConfig();
+    if (isHowLongToBeatCollectionsTarget()) return config;
+    const username = getHowLongToBeatUserSlug();
+    const detected = buildHowLongToBeatKnownCategories(username, document);
+    const defaults = {
+      retired: { name: 'Retired', route: 'retired' },
+      completed: { name: 'Completed', route: 'completed' },
+      playing: { name: 'Playing', route: 'playing' },
+      backlog: { name: 'Backlog', route: 'backlog' },
+    };
+    const pills = new Map(
+      (config.categories || []).flatMap(category => category.pills || []).map(pill => [pill.id, pill])
+    );
+    Object.entries(defaults).forEach(([pillId, source]) => {
+      const pill = pills.get(pillId);
+      if (!pill) return;
+      const discovered = detected.find(category => category.name.toLowerCase() === source.name.toLowerCase());
+      pill.collections = [discovered || {
+        name: source.name,
+        games: 0,
+        url: getHowLongToBeatCategoryUrlFromRoute(source.route, 1, username),
+      }];
+    });
+    return config;
+  }
+
   configureSourceDescriptor('howlongtobeat', {
     statusConfig: {
-      discoverCollections: fetchHowLongToBeatPublicCategories,
-      defaultConfigFromCollections: makeDefaultStatusPillConfig,
+      discoverCollections: () => isHowLongToBeatCollectionsTarget()
+        ? fetchHowLongToBeatListCollections()
+        : fetchHowLongToBeatPublicCategories(),
+      defaultConfigFromCollections: makeDefaultHowLongToBeatStatusPillConfig,
+      buildDefaultConfig: () => makeDefaultHowLongToBeatStatusPillConfig(),
+      syncDefaultCounts: collections => {
+        if (isHowLongToBeatCollectionsTarget()) syncConfiguredCollectionCounts(collections);
+        else syncHowLongToBeatConfigCollectionCounts(collections);
+      },
       storageKey: HLTB_STATUS_PILL_CONFIG_STORAGE_KEY,
+      loadAllCounts: runHowLongToBeatStatusConfigurationPreflight,
     },
   });
+
+  function getVndbLabelCollections(doc = document) {
+    const labels = new Map();
+    doc.querySelectorAll('.labelfilters input[name="l"]').forEach(input => {
+      const label = doc.querySelector(`label[for="${input.id}"]`);
+      const rawName = String(label && label.textContent || '').trim();
+      if (!rawName) return;
+      const name = rawName === 'Stalled'
+        ? 'Stall'
+        : rawName === 'No label'
+          ? 'No Label'
+          : rawName.replace(/^Wishlist-/, 'Wishlist ');
+      let countText = '';
+      let node = label.nextSibling;
+      while (node && !(node.nodeType === Node.ELEMENT_NODE && /^(?:EM|INPUT|BR)$/.test(node.tagName))) {
+        countText += node.textContent || '';
+        node = node.nextSibling;
+      }
+      const countMatch = countText.match(/\((\d+)\)/);
+      labels.set(name, {
+        name,
+        games: countMatch ? Number(countMatch[1]) : 0,
+        url: `vndb-label:${name}`,
+      });
+    });
+    return [...labels.values()];
+  }
+
+  async function fetchVndbLabels() {
+    return getVndbLabelCollections(document);
+  }
+
+  configureSourceDescriptor('vndb', {
+    statusConfig: {
+      discoverCollections: fetchVndbLabels,
+      defaultConfigFromCollections: makeDefaultVndbStatusPillConfig,
+      buildDefaultConfig: () => makeDefaultVndbStatusPillConfig(),
+      syncDefaultCounts: collections => syncConfiguredCollectionCounts(collections),
+      storageKey: VNDB_STATUS_PILL_CONFIG_STORAGE_KEY,
+    },
+  });
+
+  const GAMEFAQS_LISTS = [
+    { id: -5, name: 'Have Played', url: 'gamefaqs-list:-5' },
+    { id: -6, name: 'Used to Own', url: 'gamefaqs-list:-6' },
+    { id: -7, name: 'Own Digitally', url: 'gamefaqs-list:-7' },
+    { id: -8, name: 'Own Physically', url: 'gamefaqs-list:-8' },
+  ];
+  function isGameFaqsListsTarget(pageUrl = location.href) {
+    try {
+      return new URL(pageUrl, location.origin).pathname.replace(/\/+$/, '') === '/mygames/lists';
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function getGameFaqsTarget() {
+    return isGameFaqsListsTarget() ? 'lists' : 'collection';
+  }
+
+  function parseGameFaqsCustomListsDocument(doc, pageUrl = 'https://gamefaqs.gamespot.com/mygames/lists') {
+    const lists = [];
+    doc.querySelectorAll('a.bold[href*="/mygames/lists?list="]').forEach(link => {
+      const url = new URL(link.getAttribute('href'), pageUrl);
+      const listId = Number(url.searchParams.get('list'));
+      if (!Number.isFinite(listId) || listId < 0) return;
+      const row = link.closest('li');
+      const countText = String(row?.querySelector('.meta.float_r')?.textContent || '').trim();
+      const countMatch = countText.match(/([\d,]+)\s+games?/i);
+      lists.push({
+        id: listId,
+        name: String(link.textContent || '').trim().replace(/\s+/g, ' '),
+        games: countMatch ? Number(countMatch[1].replace(/,/g, '')) : 0,
+        url: url.href,
+      });
+    });
+    const byUrl = new Map();
+    lists.forEach(list => byUrl.set(list.url, list));
+    return [...byUrl.values()];
+  }
+
+  function parseGameFaqsListCount(doc) {
+    const countText = String(doc && doc.querySelector('#list_count')?.textContent || '').trim();
+    const count = Number(countText.replace(/[^\d]/g, ''));
+    return Number.isFinite(count) ? count : 0;
+  }
+
+  async function fetchGameFaqsListCollections() {
+    return Promise.all(GAMEFAQS_LISTS.map(async list => {
+      const pageUrl = getGameFaqsAjaxListUrl(list.id, 0);
+      const html = await fetchHtml(pageUrl, { maxAttempts: 3, timeoutMs: 20000 });
+      const doc = new DOMParser().parseFromString(html, 'text/html');
+      return {
+        name: list.name,
+        games: parseGameFaqsListCount(doc),
+        url: list.url,
+      };
+    }));
+  }
+
+  async function fetchGameFaqsCustomListCollections() {
+    let doc = document;
+    const overviewUrl = 'https://gamefaqs.gamespot.com/mygames/lists';
+    if (!isGameFaqsListsTarget() || new URL(location.href).searchParams.has('list')) {
+      const html = await fetchHtml(overviewUrl, { maxAttempts: 3, timeoutMs: 20000 });
+      doc = new DOMParser().parseFromString(html, 'text/html');
+    }
+    return parseGameFaqsCustomListsDocument(doc, overviewUrl).map(list => ({
+      name: list.name,
+      games: list.games,
+      url: list.url,
+    }));
+  }
+
+  async function fetchGameFaqsTargetCollections() {
+    return isGameFaqsListsTarget()
+      ? fetchGameFaqsCustomListCollections()
+      : fetchGameFaqsListCollections();
+  }
+
+  function gameFaqsListColor(index) {
+    const colors = ['#16a34a', '#2563eb', '#7c3aed', '#ea580c', '#db2777', '#0d9488', '#b45309', '#475569'];
+    return colors[index % colors.length];
+  }
+
+  function makeDefaultGameFaqsCustomListsStatusPillConfig(collections = parseGameFaqsCustomListsDocument(document)) {
+    const pills = collections.map((collection, index) => ({
+      id: `gamefaqs-custom-${new URL(collection.url).searchParams.get('list') || index + 1}`,
+      kind: 'status',
+      label: collection.name,
+      color: gameFaqsListColor(index),
+      source: { type: 'status', value: `gamefaqs-custom-${index + 1}` },
+      collections: [{ name: collection.name, games: collection.games, url: collection.url }],
+    }));
+    const categories = [];
+    for (let index = 0; index < pills.length; index += STATUS_PILL_SLOT_COUNT) {
+      categories.push({
+        id: `gamefaqs-lists-group-${categories.length + 1}`,
+        label: `Group ${categories.length + 1}`,
+        pills: pills.slice(index, index + STATUS_PILL_SLOT_COUNT),
+      });
+    }
+    while (categories.length < 3) {
+      categories.push({
+        id: `gamefaqs-lists-group-${categories.length + 1}`,
+        label: `Group ${categories.length + 1}`,
+        pills: [],
+      });
+    }
+    return { categories };
+  }
+
+  function ensureGameFaqsThreeStatusGroups(config = statusPillConfig) {
+    if (!config || !Array.isArray(config.categories)) return config;
+    while (config.categories.length < 3) {
+      const index = config.categories.length + 1;
+      config.categories.push({
+        id: `${isGameFaqsListsTarget() ? 'gamefaqs-lists' : 'gamefaqs'}-group-${index}`,
+        label: `Group ${index}`,
+        pills: [],
+      });
+    }
+    return config;
+  }
+
+  function syncGameFaqsCustomListsIntoConfig(collections) {
+    const normalized = (collections || []).map(normalizeMobyGamesCollection).filter(Boolean);
+    const configuredUrls = new Set();
+    (statusPillConfig.categories || []).forEach(category => {
+      (category.pills || []).forEach(pill => {
+        normalizeStatusPillCollections(pill.collections).forEach(collection => configuredUrls.add(collection.url));
+      });
+    });
+    const missing = normalized.filter(collection => !configuredUrls.has(collection.url));
+    missing.forEach((collection, index) => {
+      let category = (statusPillConfig.categories || []).find(entry => (entry.pills || []).length < STATUS_PILL_SLOT_COUNT);
+      if (!category) {
+        category = {
+          id: `gamefaqs-lists-group-${statusPillConfig.categories.length + 1}`,
+          label: `Group ${statusPillConfig.categories.length + 1}`,
+          pills: [],
+        };
+        statusPillConfig.categories.push(category);
+      }
+      const listId = new URL(collection.url).searchParams.get('list') || makeConfigPillId('list');
+      category.pills.push({
+        id: `gamefaqs-custom-${listId}`,
+        kind: 'status',
+        label: collection.name,
+        color: gameFaqsListColor(configuredUrls.size + index),
+        source: { type: 'status', value: `gamefaqs-custom-${listId}` },
+        collections: [collection],
+      });
+    });
+  }
+
+  function makeDefaultGameFaqsStatusPillConfig() {
+    if (isGameFaqsListsTarget()) return makeDefaultGameFaqsCustomListsStatusPillConfig();
+    const status = (id, label, color, sourceName) => ({
+      id,
+      kind: 'status',
+      label,
+      color,
+      source: { type: 'status', value: id },
+      collections: [{ name: sourceName, games: 0, url: `gamefaqs-list:${GAMEFAQS_LISTS.find(list => list.name === sourceName).id}` }],
+    });
+    return {
+      categories: [
+        {
+          id: 'gamefaqs-group-1',
+          label: 'Group 1',
+          pills: [
+            status('gamefaqs-played', 'Played', '#16a34a', 'Have Played'),
+            status('gamefaqs-owned', 'Owned', '#7c3aed', 'Used to Own'),
+          ],
+        },
+        {
+          id: 'gamefaqs-group-2',
+          label: 'Group 2',
+          pills: [
+            status('gamefaqs-digitally', 'Digitally', '#2563eb', 'Own Digitally'),
+            status('gamefaqs-physically', 'Physically', '#ea580c', 'Own Physically'),
+          ],
+        },
+        {
+          id: 'gamefaqs-group-3',
+          label: 'Group 3',
+          pills: [],
+        },
+      ],
+    };
+  }
+
+  configureSourceDescriptor('gamefaqs', {
+    statusConfig: {
+      discoverCollections: fetchGameFaqsTargetCollections,
+      defaultConfigFromCollections: makeDefaultGameFaqsStatusPillConfig,
+      buildDefaultConfig: collections => isGameFaqsListsTarget()
+        ? makeDefaultGameFaqsCustomListsStatusPillConfig(collections)
+        : makeDefaultGameFaqsStatusPillConfig(),
+      syncDefaultCounts: collections => syncConfiguredCollectionCounts(collections),
+      storageKey: GAMEFAQS_STATUS_PILL_CONFIG_STORAGE_KEY,
+    },
+  });
+
+  const IGDB_LIST_DEFINITIONS = [
+    { name: 'Playing', slug: 'playing', noStatus: 'Playing-No Status' },
+    { name: 'Want to Play', slug: 'want-to-play', noStatus: 'Want-No Status' },
+    { name: 'Played', slug: 'played', noStatus: 'Played-No Status' },
+  ];
+  const IGDB_STATUS_NAMES = [
+    'Completed', 'Finished', 'Abandoned',
+    'Currently Playing', 'Replaying', 'Endless', 'On-hold',
+    'Backlog', 'Wishlist',
+    'Played-No Status', 'Playing-No Status', 'Want-No Status',
+  ];
+
+  function getIgdbStatusCollection(name, games = 0) {
+    return {
+      name,
+      games,
+      url: `igdb-status:${name}`,
+    };
+  }
+
+  async function fetchIgdbStatusCollections() {
+    return igdbStatusCollectionsCache || IGDB_STATUS_NAMES.map(name => getIgdbStatusCollection(name));
+  }
+
+  async function runIgdbStatusCountPreflight() {
+    if (exportInProgress) return;
+    const username = getIgdbUserSlug();
+    if (!username) throw new Error('Open an IGDB user profile before loading status counts.');
+    return runExportSession(async () => {
+      setBackloggdPreflightWait(true);
+      const listsTarget = isIgdbListsTarget();
+      const listDefinitions = listsTarget
+        ? await fetchIgdbListCollections({ force: true })
+        : IGDB_LIST_DEFINITIONS;
+      const counts = new Map(IGDB_STATUS_NAMES.map(name => [name.toLowerCase(), 0]));
+      const listCounts = [];
+      const cachedPages = [];
+      const countConfig = listsTarget
+        ? makeDefaultIgdbListsStatusPillConfig(listDefinitions)
+        : makeDefaultIgdbStatusPillConfig();
+
+      for (let listIndex = 0; listIndex < listDefinitions.length; listIndex += 1) {
+        const list = listDefinitions[listIndex];
+        let listCount = 0;
+        await paginatePages({
+          startPage: 1,
+          maxPage: 1000,
+          loadPage: async page => {
+            const listUrl = list.url || `https://www.igdb.com/users/${encodeURIComponent(username)}/lists/${list.slug}`;
+            const pageUrlObject = new URL(listUrl);
+            pageUrlObject.searchParams.set('page', String(page));
+            pageUrlObject.searchParams.set('per_page', '100');
+            const pageUrl = pageUrlObject.href;
+            addLog(`Loading IGDB ${list.name} counts, page ${page}...`, 'info', 'igdb-count-progress');
+            const doc = await withIgdbRenderedListDocument(pageUrl);
+            cachedPages.push({
+              listSlug: list.slug,
+              listName: list.name,
+              pageUrl,
+              html: doc.documentElement.outerHTML,
+            });
+            return parseIgdbListDocument(doc, pageUrl, countConfig);
+          },
+          getItems: parsed => Array.from({ length: parsed.cardCount }, (_, index) => index),
+          getSignature: (parsed, page) => parsed.signature || `${list.slug}:${page}:${parsed.cardCount}`,
+          onPage: parsed => {
+            listCount += parsed.cardCount;
+            Object.entries(parsed.actualStatusCounts || {}).forEach(([sourceName, count]) => {
+              const sourceKey = sourceName.toLowerCase();
+              if (counts.has(sourceKey)) counts.set(sourceKey, counts.get(sourceKey) + Number(count || 0));
+            });
+          },
+          shouldStop: (parsed, page) => page >= parsed.totalPages,
+        });
+        listCounts.push({
+          ...list,
+          games: listCount,
+          url: list.url || `https://www.igdb.com/users/${encodeURIComponent(username)}/lists/${list.slug}`,
+        });
+        setProgress(Math.round(((listIndex + 1) / listDefinitions.length) * 100));
+      }
+
+      const collections = listsTarget
+        ? [
+            ...listCounts,
+            ...IGDB_STATUS_NAMES
+              .map(name => getIgdbStatusCollection(name, counts.get(name.toLowerCase()) || 0))
+              .filter(collection => collection.games > 0),
+          ]
+        : IGDB_STATUS_NAMES.map(name => getIgdbStatusCollection(name, counts.get(name.toLowerCase()) || 0));
+      if (listsTarget) igdbListCollectionsCache = collections;
+      else igdbStatusCollectionsCache = collections;
+      igdbBasicScrapeCache = {
+        username,
+        listsTarget,
+        pages: cachedPages,
+        createdAt: Date.now(),
+      };
+      syncConfiguredCollectionCounts(collections);
+      addLog(
+        `IGDB status counts loaded: ${collections.map(collection => `${collection.name} ${collection.games}`).join(', ')}`
+      );
+      setProgress(100);
+    }, {
+      onFinally: () => setBackloggdPreflightWait(false),
+    });
+  }
+
+  function parseIgdbListCollectionsDocument(doc, pageUrl = location.href) {
+    const username = getIgdbUserSlug(pageUrl);
+    if (!username) return [];
+    const pathPrefix = `/users/${encodeURIComponent(username)}/lists/`;
+    const collections = [];
+    doc.querySelectorAll(`a[href^="${pathPrefix}"]`).forEach(link => {
+      const href = link.getAttribute('href') || '';
+      const slug = href.slice(pathPrefix.length).split(/[?#/]/)[0];
+      if (!slug) return;
+      const name = String(link.querySelector('button[title]')?.getAttribute('title') || link.textContent || '').trim().replace(/\s+/g, ' ');
+      const cardText = String(link.parentElement?.parentElement?.textContent || link.parentElement?.textContent || '');
+      const countMatch = cardText.match(/([\d,]+)\s+games?\b/i);
+      if (name) collections.push({
+        name,
+        games: countMatch ? Number(countMatch[1].replace(/,/g, '')) : 0,
+        url: new URL(href, pageUrl).href,
+        slug,
+      });
+    });
+    return [...new Map(collections.map(collection => [collection.url, collection])).values()];
+  }
+
+  function withIgdbRenderedCollectionsDocument(url, timeoutMs = 10000) {
+    return new Promise((resolve, reject) => {
+      const iframe = document.createElement('iframe');
+      let settled = false;
+      let interval = null;
+      let timeout = null;
+
+      function cleanup() {
+        if (interval) clearInterval(interval);
+        if (timeout) clearTimeout(timeout);
+        iframe.remove();
+      }
+
+      function finish(fn, value) {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        fn(value);
+      }
+
+      function tryRead() {
+        try {
+          checkExportCancelled();
+          const doc = iframe.contentDocument;
+          if (!doc || doc.readyState === 'loading') return;
+          if (!parseIgdbListCollectionsDocument(doc, url).length) return;
+          const html = doc.documentElement && doc.documentElement.outerHTML;
+          if (html) finish(resolve, new DOMParser().parseFromString(html, 'text/html'));
+        } catch (error) {
+          finish(reject, error);
+        }
+      }
+
+      iframe.style.cssText = 'position:absolute;width:1280px;height:900px;left:-10000px;top:0;border:0;opacity:0;pointer-events:none;';
+      iframe.addEventListener('load', tryRead);
+      interval = setInterval(tryRead, 100);
+      timeout = setTimeout(() => finish(reject, new Error(`Timed out rendering IGDB collections ${url}`)), timeoutMs);
+      document.body.appendChild(iframe);
+      iframe.src = url;
+    });
+  }
+
+  async function fetchIgdbListCollections({ force = false } = {}) {
+    if (!force && igdbListCollectionsCache) return igdbListCollectionsCache;
+    if (!force && igdbListCollectionsPromise) return igdbListCollectionsPromise;
+    const username = getIgdbUserSlug();
+    if (!username) return [];
+    igdbListCollectionsPromise = (async () => {
+      const pageUrl = `https://www.igdb.com/users/${encodeURIComponent(username)}#lists`;
+      let collections = isIgdbListsTarget()
+        ? parseIgdbListCollectionsDocument(document, pageUrl)
+        : [];
+      if (!collections.length) {
+        const renderedDoc = await withIgdbRenderedCollectionsDocument(pageUrl);
+        collections = parseIgdbListCollectionsDocument(renderedDoc, pageUrl);
+      }
+      igdbListCollectionsCache = collections;
+      return collections;
+    })().finally(() => {
+      igdbListCollectionsPromise = null;
+    });
+    return igdbListCollectionsPromise;
+  }
+
+  async function prefetchIgdbListCollections() {
+    try {
+      const collections = await fetchIgdbListCollections();
+      if (!isIgdbListsTarget()) return collections;
+      syncConfiguredCollectionCounts(collections);
+      saveStatusPillConfig();
+      return collections;
+    } catch (error) {
+      console.error('Could not preload IGDB lists.', error);
+      return [];
+    }
+  }
+
+  function makeDefaultIgdbListsStatusPillConfig(collections = igdbListCollectionsCache || []) {
+    const bySlug = new Map(collections.map(collection => [collection.slug, collection]));
+    const status = (id, label, color, slug, fallbackName) => ({
+      id,
+      kind: 'status',
+      label,
+      color,
+      source: { type: 'status', value: id },
+      collections: [bySlug.get(slug) || {
+        name: fallbackName,
+        games: 0,
+        url: `https://www.igdb.com/users/${encodeURIComponent(getIgdbUserSlug())}/lists/${slug}`,
+        slug,
+      }],
+    });
+    return {
+      categories: [
+        { id: 'igdb-lists-group-1', label: 'Group 1', pills: [status('igdb-list-played', 'Played', '#16a34a', 'played', 'Played')] },
+        { id: 'igdb-lists-group-2', label: 'Group 2', pills: [status('igdb-list-playing', 'Playing', '#2563eb', 'playing', 'Playing')] },
+        { id: 'igdb-lists-group-3', label: 'Group 3', pills: [status('igdb-list-backlog', 'Backlog', '#92400e', 'want-to-play', 'Want to Play')] },
+      ],
+    };
+  }
+
+  function makeDefaultIgdbStatusPillConfig() {
+    const status = (id, label, color, sourceNames) => ({
+      id,
+      kind: 'status',
+      label,
+      color,
+      source: { type: 'status', value: id },
+      collections: (Array.isArray(sourceNames) ? sourceNames : [sourceNames]).map(name => getIgdbStatusCollection(name)),
+    });
+    return {
+      categories: [
+        {
+          id: 'igdb-group-1',
+          label: 'Group 1',
+          pills: [
+            {
+              id: 'igdb-played-total',
+              kind: 'aggregate',
+              label: 'Played',
+              sources: [
+                'igdb-completed', 'igdb-finished', 'igdb-abandoned',
+                'igdb-playing', 'igdb-replaying', 'igdb-endless', 'igdb-on-hold',
+              ],
+            },
+            status('igdb-completed', 'Completed', '#15803d', ['Completed', 'Played-No Status']),
+            status('igdb-finished', 'Finished', '#14b8a6', 'Finished'),
+            status('igdb-abandoned', 'Abandoned', '#dc2626', 'Abandoned'),
+          ],
+        },
+        {
+          id: 'igdb-group-2',
+          label: 'Group 2',
+          pills: [
+            status('igdb-playing', 'Playing', '#2563eb', ['Currently Playing', 'Playing-No Status']),
+            status('igdb-replaying', 'Replaying', '#7c3aed', 'Replaying'),
+            status('igdb-endless', 'Endless', '#ea580c', 'Endless'),
+            status('igdb-on-hold', 'On-hold', '#db2777', 'On-hold'),
+          ],
+        },
+        {
+          id: 'igdb-group-3',
+          label: 'Group 3',
+          pills: [
+            { id: 'igdb-want-total', kind: 'aggregate', label: 'Want', sources: ['igdb-backlog', 'igdb-wishlist'] },
+            status('igdb-backlog', 'Backlog', '#92400e', ['Backlog', 'Want-No Status']),
+            status('igdb-wishlist', 'Wishlist', '#f0a500', 'Wishlist'),
+          ],
+        },
+      ],
+    };
+  }
+
+  configureSourceDescriptor('igdb', {
+    statusConfig: {
+      discoverCollections: () => isIgdbListsTarget() ? fetchIgdbListCollections() : fetchIgdbStatusCollections(),
+      defaultConfigFromCollections: () => isIgdbListsTarget() ? makeDefaultIgdbListsStatusPillConfig() : makeDefaultIgdbStatusPillConfig(),
+      buildDefaultConfig: collections => isIgdbListsTarget()
+        ? makeDefaultIgdbListsStatusPillConfig(collections)
+        : makeDefaultIgdbStatusPillConfig(),
+      syncDefaultCounts: collections => syncConfiguredCollectionCounts(collections),
+      storageKey: IGDB_STATUS_PILL_CONFIG_STORAGE_KEY,
+      loadAllCounts: runIgdbStatusCountPreflight,
+    },
+  });
+
+  function ensureIgdbNoStatusSources(config) {
+    if (!config || !Array.isArray(config.categories)) return config;
+    const additions = {
+      'igdb-completed': 'Played-No Status',
+      'igdb-playing': 'Playing-No Status',
+      'igdb-backlog': 'Want-No Status',
+    };
+    config.categories.flatMap(category => category.pills || []).forEach(pill => {
+      const sourceName = additions[pill.id];
+      if (!sourceName || pill.kind !== 'status') return;
+      const collections = normalizeStatusPillCollections(pill.collections);
+      if (!collections.some(collection => collection.name === sourceName)) {
+        collections.push(getIgdbStatusCollection(sourceName));
+      }
+      pill.collections = collections;
+    });
+    return config;
+  }
 
   function loadStatusPillConfig() {
     const statusConfigDescriptor = getSourceStatusConfigDescriptorForHost();
@@ -3420,11 +6010,29 @@ ZX81`
       : makeDefaultStatusPillConfig;
     const storageKey = statusConfigDescriptor && statusConfigDescriptor.storageKey;
     const stored = storageKey ? storageGet(storageKey, null) : null;
-    if (!stored) return normalizeStatusPillConfig(makeDefaultConfig());
+    if (!stored) {
+      const config = normalizeStatusPillConfig(makeDefaultConfig());
+      if (isIgdbHost() && !isIgdbListsTarget()) ensureIgdbNoStatusSources(config);
+      if (isBackloggdHost() && isBackloggdListsTarget()) ensureBackloggdListsThreeGroups(config);
+      return isGameFaqsHost() ? ensureGameFaqsThreeStatusGroups(config) : config;
+    }
     try {
-      return normalizeStatusPillConfig(JSON.parse(stored));
+      const config = resetStatusPillConfigCounts(normalizeStatusPillConfig(JSON.parse(stored)));
+      if (isVndbHost()) {
+        (config.categories || []).flatMap(category => category.pills || []).forEach(pill => {
+          if (pill.id === 'vndb-wishlist-medium' && pill.label === 'Wishlist Midium') {
+            pill.label = 'Wishlist Medium';
+          }
+        });
+      }
+      if (isIgdbHost() && !isIgdbListsTarget()) ensureIgdbNoStatusSources(config);
+      if (isBackloggdHost() && isBackloggdListsTarget()) ensureBackloggdListsThreeGroups(config);
+      return isGameFaqsHost() ? ensureGameFaqsThreeStatusGroups(config) : config;
     } catch (_) {
-      return normalizeStatusPillConfig(makeDefaultConfig());
+      const config = normalizeStatusPillConfig(makeDefaultConfig());
+      if (isIgdbHost() && !isIgdbListsTarget()) ensureIgdbNoStatusSources(config);
+      if (isBackloggdHost() && isBackloggdListsTarget()) ensureBackloggdListsThreeGroups(config);
+      return isGameFaqsHost() ? ensureGameFaqsThreeStatusGroups(config) : config;
     }
   }
 
@@ -3432,10 +6040,9 @@ ZX81`
     const statusConfigDescriptor = getSourceStatusConfigDescriptorForHost();
     const storageKey = statusConfigDescriptor && statusConfigDescriptor.storageKey;
     if (!storageKey) return;
-    storageSet(storageKey, JSON.stringify(normalizeStatusPillConfig(cloneStatusPillConfig(statusPillConfig))));
+    const storedConfig = resetStatusPillConfigCounts(normalizeStatusPillConfig(cloneStatusPillConfig(statusPillConfig)));
+    storageSet(storageKey, JSON.stringify(storedConfig));
   }
-
-  statusPillConfig = loadStatusPillConfig();
 
   function getAllStatusPillsFromConfig(config = statusPillConfig) {
     return (config.categories || []).flatMap(category =>
@@ -3579,6 +6186,9 @@ ZX81`
         if (exportInProgress) await waitIfExportPaused();
         const parsed = parseMobyGamesCollectionPage(html, nextUrl);
         debugEvents.push(logMobyGamesCollectionDebug('Parsed fetched collection page.', { url: nextUrl, ...(parsed.debug || {}) }));
+        if (parsed.debug && parsed.debug.cloudflareChallenge) {
+          addLog(`Cloudflare challenge page detected for ${networkLogUrl(nextUrl)}`, 'error');
+        }
         parsed.collections.forEach(collection => byUrl.set(collection.url, collection));
         nextUrl = parsed.nextUrl;
       } catch (error) {
@@ -3897,7 +6507,7 @@ ZX81`
     const unique = [...new Set((Array.isArray(values) ? values : [])
       .map(value => String(value || '').trim().replace(/\s+/g, ' '))
       .filter(Boolean))];
-    return unique.sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base', numeric: true }));
+    return unique.sort(compareNatural);
   }
 
   function parseMobyGamesPlayerAverageRating(doc) {
@@ -4139,6 +6749,7 @@ ZX81`
       gamePagePlatforms,
       gamePageRating: extractHowLongToBeatGamePageRating(doc, game),
       genres: splitHowLongToBeatMetadataList(genre),
+      length: extractHowLongToBeatGameLength(doc, game),
       releaseDate: earliestHowLongToBeatReleaseDate(game, doc),
       coverUrl,
     };
@@ -4157,16 +6768,19 @@ ZX81`
       platforms: [],
       averageRating: [],
       coverUrl: [],
+      length: [],
     };
     const failed = [];
     const list = Array.isArray(items) ? items : [];
     if (!list.length) return { missed, missedByField, failed };
     addLog(`HowLongToBeat advanced metadata: checking ${list.length} game pages`);
     let completed = 0;
-    await mapWithConcurrency(list, 1, async item => {
+    const concurrency = loadRequestDelaySettings('howlongtobeat').concurrency;
+    await mapWithConcurrency(list, concurrency, async item => {
       const itemUrl = item.url || item.gameUrl;
       const itemName = item.name || item.title || itemUrl || 'Unknown game';
       try {
+        await waitForRequestSlot('howlongtobeat', HLTB_REQUEST_DELAY_MIN_MS, HLTB_REQUEST_DELAY_MAX_MS);
         const html = await fetchHtml(itemUrl, { maxAttempts: 2, timeoutMs: 12000 });
         const details = parseHowLongToBeatGamePage(html, itemUrl);
         const detailPlatforms = uniqueSortedLabels(splitHowLongToBeatMetadataList(details.gamePagePlatforms));
@@ -4177,23 +6791,26 @@ ZX81`
         item.full_release_date = item.release_date;
         item.average_rating = details.gamePageRating == null ? item.average_rating : details.gamePageRating;
         item.averageRating = item.average_rating;
+        item.length = details.length || item.length || '';
         item.cover_url = details.coverUrl || item.cover_url || '';
         item.coverUrl = item.cover_url;
         item.gamePagePlatforms = detailPlatforms;
         item.game_page_platforms = detailPlatforms;
+      } catch (error) {
+        failed.push({ title: itemName, url: itemUrl, error: error && error.message ? error.message : String(error) });
+      } finally {
         completed += 1;
         if (completed === list.length || completed % 5 === 0) {
           addLog(`HowLongToBeat advanced metadata ${completed} of ${list.length}`, 'info', 'hltb-advanced-progress');
         }
-        setProgressInRange(20, 80, completed, list.length);
-      } catch (error) {
-        failed.push({ title: itemName, url: itemUrl, error: error && error.message ? error.message : String(error) });
+        setProgressInStage('advanced', completed, list.length, 20, 95);
       }
       if (!item.release_date) missedByField.releaseDate.push(itemName);
       if (!item.genres || !item.genres.length) missedByField.genres.push(itemName);
       if (!item.platforms || !item.platforms.length) missedByField.platforms.push(itemName);
       if (item.average_rating == null) missedByField.averageRating.push(itemName);
       if (!item.cover_url) missedByField.coverUrl.push(itemName);
+      if (!item.length) missedByField.length.push(itemName);
     });
     removeLog('hltb-advanced-progress');
     Object.entries(missedByField).forEach(([field, names]) => {
@@ -4216,10 +6833,13 @@ ZX81`
     if (!list.length) return { missed, missedByField, failed };
     addLog(`MobyGames enhanced metadata: checking ${list.length} game pages`);
     let completed = 0;
-    await mapWithConcurrency(items, 1, async item => {
+    let consecutiveFailures = 0;
+    const concurrency = loadRequestDelaySettings('mobygames').concurrency;
+    await mapWithConcurrency(items, concurrency, async item => {
       const itemUrl = mobyItemUrl(item);
       const itemName = item.name || item.title || itemUrl || 'Unknown game';
       try {
+        await waitForRequestSlot('mobygames', MOBYGAMES_REQUEST_DELAY_MIN_MS, MOBYGAMES_REQUEST_DELAY_MAX_MS);
         const html = await fetchHtml(itemUrl, { maxAttempts: 2, timeoutMs: 12000 });
         const overview = parseMobyGamesOverviewPage(html);
         item.fullReleaseDate = overview.fullReleaseDate || overview.release_date || item.fullReleaseDate || item.release_date || '';
@@ -4239,6 +6859,7 @@ ZX81`
         item.average_rating = normalizeAverageRatingValue(overview.average_rating == null ? item.average_rating : overview.average_rating);
         if (item.average_rating == null && item.averageRating != null) item.average_rating = normalizeAverageRatingValue(item.averageRating);
         item.averageRating = item.average_rating;
+        consecutiveFailures = 0;
         const missing = [
           !item.fullReleaseDate ? 'full release date' : '',
           !(item.genres.length || item.gameplay.length) ? 'genres/gameplay' : '',
@@ -4266,6 +6887,10 @@ ZX81`
         item.average_rating = normalizeAverageRatingValue(item.average_rating == null ? item.averageRating : item.average_rating);
         item.averageRating = item.average_rating;
         failed.push(itemName);
+        consecutiveFailures += 1;
+        if (consecutiveFailures >= CONSECUTIVE_SCRAPE_FAILURE_LIMIT) {
+          throw new Error(`MobyGames scraping stopped after ${CONSECUTIVE_SCRAPE_FAILURE_LIMIT} consecutive game-page failures.`);
+        }
         missedByField.fullReleaseDate.push(itemName);
         missedByField.genres.push(itemName);
         missedByField.gameplay.push(itemName);
@@ -4278,7 +6903,7 @@ ZX81`
         if (!exportCancelRequested) {
           completed += 1;
           addLog(`MobyGames enhanced metadata ${completed} of ${list.length}`, 'info', 'moby-enhanced-progress');
-          setProgressInRange(20, 80, completed, list.length);
+          setProgressInStage('advanced', completed, list.length, 20, 95);
         }
       }
     });
@@ -4294,119 +6919,21 @@ ZX81`
     return { missed, missedByField, failed };
   }
 
-  function withMobyGamesRenderedDocument(url, parser, timeoutMs = 15000) {
-    return new Promise((resolve, reject) => {
-      const iframe = document.createElement('iframe');
-      let settled = false;
-      let interval = null;
-      let timeout = null;
-
-      function cleanup() {
-        if (interval) clearInterval(interval);
-        if (timeout) clearTimeout(timeout);
-        iframe.remove();
-      }
-
-      function finish(fn, value) {
-        if (settled) return;
-        settled = true;
-        cleanup();
-        fn(value);
-      }
-
-      function tryParse({ allowEmpty = false } = {}) {
-        try {
-          const doc = iframe.contentDocument;
-          if (!doc) return false;
-          const hasLikelyTable = [...doc.querySelectorAll('table')].some(table => {
-            const headers = [...table.querySelectorAll('thead th, tr:first-child th')]
-              .map(th => String(th.textContent || '').trim().replace(/\s+/g, ' '));
-            return headers.includes('Title (Year)') || (headers.includes('Name') && headers.includes('Games'));
-          });
-          if (!allowEmpty && !hasLikelyTable) return false;
-          finish(resolve, parser(doc, iframe.contentWindow ? iframe.contentWindow.location.href : url));
-          return true;
-        } catch (error) {
-          finish(reject, error);
-          return true;
-        }
-      }
-
-      iframe.hidden = true;
-      iframe.style.cssText = 'position:absolute;width:1px;height:1px;left:-9999px;top:-9999px;border:0;opacity:0;pointer-events:none;';
-      iframe.addEventListener('load', () => {
-        setTimeout(() => tryParse({ allowEmpty: false }), 250);
-      });
-      interval = setInterval(() => tryParse({ allowEmpty: false }), 300);
-      timeout = setTimeout(() => {
-        if (!tryParse({ allowEmpty: true })) {
-          finish(reject, new Error(`Timed out loading ${url}`));
-        }
-      }, timeoutMs);
-      document.body.appendChild(iframe);
-      iframe.src = url;
-    });
-  }
-
-  function withHowLongToBeatRenderedDocument(url, parser, timeoutMs = 60000) {
-    return new Promise((resolve, reject) => {
-      const iframe = document.createElement('iframe');
-      let settled = false;
-      let interval = null;
-      let timeout = null;
-
-      function cleanup() {
-        if (interval) clearInterval(interval);
-        if (timeout) clearTimeout(timeout);
-        iframe.remove();
-      }
-
-      function finish(fn, value) {
-        if (settled) return;
-        settled = true;
-        cleanup();
-        fn(value);
-      }
-
-      function tryParse({ allowEmpty = false } = {}) {
-        try {
-          const doc = iframe.contentDocument;
-          if (!doc) return false;
-          const container = doc.querySelector('#user_games');
-          const loading = container && container.querySelector('.loading_bar');
-          const hasGames = !!(container && container.querySelector('a[href*="/game"]'));
-          if (!allowEmpty && (!container || loading || !hasGames)) return false;
-          finish(resolve, parser(doc, iframe.contentWindow ? iframe.contentWindow.location.href : url));
-          return true;
-        } catch (error) {
-          finish(reject, error);
-          return true;
-        }
-      }
-
-      iframe.hidden = true;
-      iframe.style.cssText = 'position:absolute;width:1px;height:1px;left:-9999px;top:-9999px;border:0;opacity:0;pointer-events:none;';
-      iframe.addEventListener('load', () => {
-        setTimeout(() => tryParse({ allowEmpty: false }), 500);
-      });
-      interval = setInterval(() => tryParse({ allowEmpty: false }), 500);
-      timeout = setTimeout(() => {
-        if (!tryParse({ allowEmpty: true })) {
-          finish(reject, new Error(`Timed out loading ${url}`));
-        }
-      }, timeoutMs);
-      document.body.appendChild(iframe);
-      iframe.src = url;
-    });
-  }
-
   function loadMobyGamesExportState() {
     const raw = storageGet(MOBYGAMES_EXPORT_STATE_KEY, null);
     if (!raw) return null;
     try {
-      const state = JSON.parse(raw);
-      return state && state.active ? state : null;
+      const parsedState = JSON.parse(raw);
+      const state = migrateStoredExportState(parsedState);
+      const validState = validateStoredExportState(state, 'mobygames');
+      if (!validState) {
+        clearMobyGamesExportState();
+      } else if (state !== parsedState) {
+        saveMobyGamesExportState(validState);
+      }
+      return validState;
     } catch (_) {
+      clearMobyGamesExportState();
       return null;
     }
   }
@@ -4420,19 +6947,16 @@ ZX81`
   }
 
   function saveMobyGamesExportState(state) {
+    if (storageGet(MOBYGAMES_EXPORT_CANCEL_KEY, '0') === '1') return;
     if (state && exportInProgress) {
       state.formats = getSelectedFileFormats();
       state.pausedTotalMs = exportPausedTotalMs + (exportPauseRequested && exportPausedStartedAt ? Date.now() - exportPausedStartedAt : 0);
     }
-    storageSet(MOBYGAMES_EXPORT_STATE_KEY, JSON.stringify(state));
+    Object.assign(state, saveExportState(MOBYGAMES_EXPORT_STATE_KEY, state, 'MobyGames'));
   }
 
   function clearMobyGamesExportState() {
-    try {
-      localStorage.removeItem(MOBYGAMES_EXPORT_STATE_KEY);
-    } catch (_) {
-      storageSet(MOBYGAMES_EXPORT_STATE_KEY, '');
-    }
+    storageRemove(MOBYGAMES_EXPORT_STATE_KEY);
   }
 
   function currentMobyGamesUrlWithoutHash() {
@@ -4451,66 +6975,106 @@ ZX81`
 
   function setHowLongToBeatPreflightWait(on) {
     hltbPreflightInProgress = !!on;
-    if (panel) panel.classList.toggle('bgd-hltb-preflight-running', !!on);
+    if (panel) panel.classList.toggle('bgd-count-preflight-running', !!on);
     if (exportBtn) {
       exportBtn.disabled = !!on;
       exportBtn.textContent = on ? 'LOADING' : 'Export';
     }
     if (configBtn) configBtn.disabled = !!on;
-    // During config preflight, suppress the Pause/Stop run controls and keep
-    // the Export button (in WAIT state) as the only visible control.
+    // During config preflight, suppress Pause/Stop and keep the loading
+    // Export button as the only visible control.
     if (on) {
       if (runControls) runControls.hidden = true;
       if (exportBtn) exportBtn.hidden = false;
+    } else {
+      hideRunControls();
     }
-  }
-
-  async function countHowLongToBeatCategoryGames(category, statusId) {
-    const mapping = {
-      statusId,
-      status: category.name,
-      statusColor: '#7dd3fc',
-      collection: category,
-    };
-    const signatures = new Set();
-    let total = 0;
-    for (let page = 1; page <= 100; page += 1) {
-      const url = getHowLongToBeatPageUrl(category.url, page);
-      let parsed = null;
-      try {
-        const target = new URL(url, location.href);
-        const current = new URL(location.href);
-        if (target.pathname === current.pathname && target.search === current.search) {
-          parsed = parseHowLongToBeatGamesDocument(document, location.href, mapping);
-        } else {
-          parsed = await withHowLongToBeatRenderedDocument(url, (doc, renderedUrl) =>
-            parseHowLongToBeatGamesDocument(doc, renderedUrl, mapping)
-          );
-        }
-      } catch (error) {
-        if (page === 1) addLog(`HowLongToBeat status source ${category.name}: no page found, counted as 0`, 'info', `hltb-config-empty-${statusId}`);
-        break;
-      }
-      const signature = (parsed.games || []).map(game => `${game.gameUrl}|${game.platform}`).join('||');
-      if (!signature || signatures.has(signature) || !(parsed.games || []).length) break;
-      signatures.add(signature);
-      total += parsed.games.length;
-    }
-    return total;
   }
 
   function syncHowLongToBeatConfigCollectionCounts(categories) {
-    const byUrl = new Map((categories || []).map(category => [category.url, category]));
+    const mergedCategories = mergeLoadedSourceCollectionCounts(categories);
+    rememberLoadedSourceCollectionCounts(mergedCategories);
+    const byUrl = new Map(mergedCategories.map(category => [category.url, category]));
     (statusPillConfig.categories || []).forEach(category => {
       (category.pills || []).forEach(pill => {
         if (!pill || pill.kind !== 'status') return;
         pill.collections = normalizeStatusPillCollections(pill.collections).map(collection => {
           const fresh = byUrl.get(collection.url);
-          return fresh ? { ...collection, name: fresh.name, games: fresh.games } : collection;
+          return fresh
+            ? { ...collection, name: fresh.name, games: fresh.games }
+            : { ...collection, games: 0 };
         });
       });
     });
     saveStatusPillConfig();
+  }
+
+  function syncConfiguredCollectionCounts(collections) {
+    const normalized = mergeLoadedSourceCollectionCounts(collections);
+    rememberLoadedSourceCollectionCounts(normalized);
+    const byUrl = new Map(normalized.map(collection => [collection.url, collection]));
+    const byName = new Map(normalized.map(collection => [collection.name.toLowerCase(), collection]));
+    (statusPillConfig.categories || []).forEach(category => {
+      (category.pills || []).forEach(pill => {
+        if (!pill || pill.kind !== 'status') return;
+        pill.collections = normalizeStatusPillCollections(pill.collections).map(collection => {
+          const fresh = byUrl.get(collection.url) || byName.get(collection.name.toLowerCase());
+          return fresh
+            ? { ...collection, name: fresh.name, games: fresh.games, url: fresh.url }
+            : { ...collection, games: 0 };
+        });
+      });
+    });
+    saveStatusPillConfig();
+  }
+
+  function getSourceCollectionCountKeys(collection) {
+    const normalized = normalizeMobyGamesCollection(collection);
+    if (!normalized) return [];
+    return [`url:${normalized.url}`, `name:${normalized.name.toLowerCase()}`];
+  }
+
+  function rememberLoadedSourceCollectionCounts(collections) {
+    (collections || []).forEach(collection => {
+      const games = Number(collection && collection.games) || 0;
+      if (games <= 0) return;
+      getSourceCollectionCountKeys(collection).forEach(key => {
+        loadedSourceCollectionCounts.set(key, Math.max(loadedSourceCollectionCounts.get(key) || 0, games));
+      });
+    });
+  }
+
+  function mergeLoadedSourceCollectionCounts(collections) {
+    return (collections || []).map(normalizeMobyGamesCollection).filter(Boolean).map(collection => {
+      const preserved = getSourceCollectionCountKeys(collection)
+        .reduce((count, key) => Math.max(count, loadedSourceCollectionCounts.get(key) || 0), 0);
+      return preserved > collection.games ? { ...collection, games: preserved } : collection;
+    });
+  }
+
+  async function resetStatusPillConfigToDefault(
+    descriptor = getSourceStatusConfigDescriptorForHost()
+  ) {
+    const statusDescriptor = descriptor || DEFAULT_STATUS_CONFIG;
+    if (typeof statusDescriptor.prepareDefaultReset === 'function') {
+      await statusDescriptor.prepareDefaultReset();
+    }
+    const discovered = typeof statusDescriptor.discoverCollections === 'function'
+      ? await statusDescriptor.discoverCollections()
+      : [];
+    const collections = mergeLoadedSourceCollectionCounts(discovered);
+    const buildDefaultConfig = statusDescriptor.buildDefaultConfig
+      || statusDescriptor.defaultConfigFromCollections
+      || makeDefaultStatusPillConfig;
+    statusPillConfig = normalizeStatusPillConfig(buildDefaultConfig(collections));
+    if (typeof statusDescriptor.syncDefaultCounts === 'function') {
+      statusDescriptor.syncDefaultCounts(collections);
+    } else if (collections.length) {
+      syncConfiguredCollectionCounts(collections);
+    } else {
+      saveStatusPillConfig();
+    }
+    return statusPillConfig;
   }
 
   async function runHowLongToBeatStatusConfigurationPreflight() {
@@ -4565,22 +7129,70 @@ ZX81`
   }
 
   async function openSourceStatusConfiguration() {
+    if (isIgdbHost()) {
+      const targetUrl = redirectToSelectedIgdbTargetIfNeeded();
+      if (targetUrl && navigateToCorrectSourcePage(targetUrl)) return;
+    }
+    if (isGameFaqsHost()) {
+      const targetUrl = redirectToGameFaqsCollectionIfNeeded();
+      if (targetUrl && navigateToCorrectSourcePage(targetUrl)) return;
+    }
     if (isMobyGamesHost()) {
       openMobyGamesStatusConfiguration();
       return;
     }
+    if (isBackloggdHost()) {
+      preloadBackloggdStatusSourceCounts();
+      syncConfiguredCollectionCounts(getBackloggdStatusSources());
+      renderStatusPillConfigModal();
+      return;
+    }
     if (isHowLongToBeatHost()) {
+      if (isHowLongToBeatCollectionsTarget()) {
+        await fetchHowLongToBeatListCollections({ force: true });
+        renderStatusPillConfigModal();
+        return;
+      }
       const gamesRootUrl = getHowLongToBeatUserGamesRootUrl(location.href);
-      if (gamesRootUrl && !isHowLongToBeatUserGamesRootPage(location.href)) {
+      if (!isHowLongToBeatCollectionsTarget() && gamesRootUrl && !isHowLongToBeatUserGamesRootPage(location.href)) {
         savePendingNavMessage('Navigated to the correct page. Continue with configurations or exporting.');
         location.href = gamesRootUrl;
         return;
       }
-      if (hltbPreflightData) {
-        renderStatusPillConfigModal();
-        return;
+      refreshHowLongToBeatCategoryNames();
+      renderStatusPillConfigModal();
+      return;
+    }
+    if (isVndbHost()) {
+      const statusConfigDescriptor = getSourceStatusConfigDescriptorForHost();
+      const discoverCollections = statusConfigDescriptor && statusConfigDescriptor.discoverCollections;
+      if (discoverCollections) {
+        try {
+          syncConfiguredCollectionCounts(await discoverCollections());
+        } catch (_) {}
       }
-      await runHowLongToBeatStatusConfigurationPreflight();
+      renderStatusPillConfigModal();
+      return;
+    }
+    if (isGameFaqsHost()) {
+      const statusConfigDescriptor = getSourceStatusConfigDescriptorForHost();
+      const discoverCollections = statusConfigDescriptor && statusConfigDescriptor.discoverCollections;
+      if (discoverCollections) {
+        try {
+          const collections = await discoverCollections();
+          if (isGameFaqsListsTarget()) syncGameFaqsCustomListsIntoConfig(collections);
+          syncConfiguredCollectionCounts(collections);
+        } catch (error) {
+          addLog(`Could not load GameFAQs list counts: ${error && error.message ? error.message : String(error)}`, 'error');
+        }
+      }
+      renderStatusPillConfigModal();
+      return;
+    }
+    if (isIgdbHost() && isIgdbListsTarget()) {
+      const collections = await prefetchIgdbListCollections();
+      syncConfiguredCollectionCounts(collections);
+      renderStatusPillConfigModal();
       return;
     }
     renderStatusPillConfigModal();
@@ -4746,6 +7358,502 @@ ZX81`
     return order;
   }
 
+  function getIgdbConfiguredStatusMappings(config = statusPillConfig) {
+    const mappings = new Map();
+    (config && Array.isArray(config.categories) ? config.categories : []).forEach(category => {
+      (category.pills || []).forEach(pill => {
+        if (!pill || pill.kind !== 'status') return;
+        normalizeStatusPillCollections(pill.collections).forEach(collection => {
+          mappings.set(collection.name.toLowerCase(), {
+            rawStatus: collection.name,
+            status: pill.label || collection.name,
+            statusId: pill.id || '',
+            color: pill.color || '',
+            collection,
+          });
+        });
+      });
+    });
+    return mappings;
+  }
+
+  function parseIgdbReactComponent(script) {
+    try {
+      return JSON.parse(String(script && script.textContent || '').trim());
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function setBackloggdPreflightWait(on) {
+    if (panel) panel.classList.toggle('bgd-count-preflight-running', !!on);
+    if (exportBtn) {
+      exportBtn.disabled = !!on;
+      exportBtn.textContent = on ? 'LOADING' : 'Export';
+    }
+    if (configBtn) configBtn.disabled = !!on;
+    if (on) {
+      if (runControls) runControls.hidden = true;
+      if (exportBtn) exportBtn.hidden = false;
+    } else {
+      hideRunControls();
+    }
+  }
+
+  function normalizeIgdbPlatformRelease(rawRelease) {
+    const platform = rawRelease && rawRelease.platform;
+    const platformName = String(platform && platform.name || '').trim();
+    if (!platformName) return null;
+    const platformId = platform.id == null ? null : Number(platform.id);
+    let releaseDate = String(rawRelease.releaseDate || '').trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(releaseDate)) {
+      const hasCompleteParts = rawRelease.releaseYear != null
+        && rawRelease.releaseMonth != null
+        && rawRelease.releaseDay != null;
+      const year = hasCompleteParts ? Number(rawRelease.releaseYear) : NaN;
+      const month = hasCompleteParts ? Number(rawRelease.releaseMonth) : NaN;
+      const day = hasCompleteParts ? Number(rawRelease.releaseDay) : NaN;
+      releaseDate = Number.isInteger(year) && year > 0
+        && Number.isInteger(month) && month >= 1 && month <= 12
+        && Number.isInteger(day) && day >= 1 && day <= 31
+        ? `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`
+        : '';
+    }
+    return {
+      platform: platformName,
+      platform_id: Number.isFinite(platformId) ? platformId : null,
+      release_date: releaseDate || null,
+      region: rawRelease.region == null ? null : rawRelease.region,
+      release_date_status_id: rawRelease.releaseDateStatusId == null ? null : rawRelease.releaseDateStatusId,
+    };
+  }
+
+  function normalizeIgdbTaxonomyLabel(label) {
+    const normalized = String(label || '').trim();
+    return /^4X\s*\(explore,\s*expand,\s*exploit,\s*and\s*exterminate\)$/i.test(normalized)
+      ? '4X'
+      : normalized;
+  }
+
+  function getIgdbCanonicalReleaseDate(platformReleases, fallbackYear = '') {
+    const validDate = value => /^\d{4}-\d{2}-\d{2}$/.test(String(value || ''))
+      && !/^0000-/.test(String(value || ''));
+    const releasedDates = (platformReleases || [])
+      .filter(release => Number(release.release_date_status_id) === 6 && validDate(release.release_date))
+      .map(release => release.release_date)
+      .sort();
+    const allFullReleaseDates = (platformReleases || [])
+      .map(release => release.release_date)
+      .filter(validDate)
+      .sort();
+    return releasedDates[0] || allFullReleaseDates[0] || String(fallbackYear || '');
+  }
+
+  function parseIgdbGamePageMetadata(doc) {
+    const readLinkedSection = (heading, hrefPrefix) => {
+      const headingNode = [...doc.querySelectorAll('h1,h2,h3,h4,h5,h6')]
+        .find(node => String(node.textContent || '').trim().toLowerCase() === heading.toLowerCase());
+      if (!headingNode) return [];
+      const section = headingNode.parentElement || headingNode;
+      return uniqueSortedLabels(
+        [...section.querySelectorAll('a[href]')]
+          .filter(link => {
+            try {
+              return new URL(link.getAttribute('href') || '', doc.baseURI).pathname.startsWith(hrefPrefix);
+            } catch (_) {
+              return false;
+            }
+          })
+          .map(link => String(link.textContent || '').trim())
+      );
+    };
+
+    const ratingCountNode = [...doc.querySelectorAll('span')]
+      .find(node => /\buser ratings?\s*$/i.test(String(node.textContent || '').trim()));
+    let averageRating = null;
+    if (ratingCountNode) {
+      const ratingCard = ratingCountNode.parentElement && ratingCountNode.parentElement.parentElement;
+      const ratingNode = ratingCard && [...ratingCard.querySelectorAll('span')]
+        .find(node => /^\d+(?:\.\d+)?$/.test(String(node.textContent || '').trim()));
+      averageRating = normalizeAverageRatingValue(ratingNode && ratingNode.textContent);
+    }
+
+    let userRating = null;
+    const starButtonGroups = [...doc.querySelectorAll('button')]
+      .filter(button => button.querySelector('svg[data-testid="StarIcon"]'))
+      .reduce((groups, button) => {
+        const container = button.parentElement;
+        if (!container) return groups;
+        if (!groups.has(container)) groups.set(container, []);
+        groups.get(container).push(button);
+        return groups;
+      }, new Map());
+    const ratingButtons = [...starButtonGroups.values()].find(group => group.length === 10) || [];
+    if (ratingButtons.length === 10) {
+      const selectedCount = ratingButtons.filter(button => {
+        const color = String(button.style.color || '').replace(/\s+/g, '').toLowerCase();
+        return color
+          && color !== 'rgb(170,170,170)'
+          && color !== '#aaa'
+          && color !== '#aaaaaa'
+          && color !== 'gray'
+          && color !== 'grey';
+      }).length;
+      if (selectedCount > 0) userRating = selectedCount;
+    }
+
+    return {
+      genres: readLinkedSection('Genres', '/genres/').map(normalizeIgdbTaxonomyLabel),
+      themes: readLinkedSection('Themes', '/themes/').map(normalizeIgdbTaxonomyLabel),
+      averageRating,
+      userRating,
+      ratingButtonCount: ratingButtons.length,
+      ratingCountLabel: ratingCountNode ? String(ratingCountNode.textContent || '').trim() : '',
+    };
+  }
+
+  function applyIgdbGamePageMetadata(item, metadata) {
+    if (!item || !metadata) return false;
+    const igdbGenres = uniqueSortedLabels((metadata.genres || []).map(normalizeIgdbTaxonomyLabel));
+    const igdbThemes = uniqueSortedLabels((metadata.themes || []).map(normalizeIgdbTaxonomyLabel));
+    item.genres = uniqueSortedLabels([...(item.genres || []), ...igdbGenres, ...igdbThemes]);
+    item.average_rating = normalizeAverageRatingValue(metadata.averageRating);
+    item.user_rating = normalizeAverageRatingValue(metadata.userRating);
+    item.userRating = item.user_rating;
+    item.igdb_genres = igdbGenres;
+    item.igdb_themes = igdbThemes;
+    item.rating_count_label = String(metadata.ratingCountLabel || '');
+    return !!(igdbGenres.length || igdbThemes.length || item.average_rating != null || item.user_rating != null);
+  }
+
+  function withIgdbRenderedGameDocument(url, timeoutMs = 30000) {
+    return new Promise((resolve, reject) => {
+      const iframe = document.createElement('iframe');
+      let settled = false;
+      let interval = null;
+      let timeout = null;
+      let bestMetadata = null;
+      let bestScore = -1;
+      let lastImprovedAt = 0;
+      let firstMetadataAt = 0;
+
+      function cleanup() {
+        if (interval) clearInterval(interval);
+        if (timeout) clearTimeout(timeout);
+        iframe.remove();
+      }
+
+      function finish(fn, value) {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        fn(value);
+      }
+
+      function tryRead() {
+        try {
+          checkExportCancelled();
+          const doc = iframe.contentDocument;
+          if (!doc) return false;
+          const metadata = parseIgdbGamePageMetadata(doc);
+          const score = metadata.genres.length
+            + metadata.themes.length
+            + (metadata.averageRating == null ? 0 : 1)
+            + (metadata.userRating == null ? 0 : 1);
+          if (score > bestScore) {
+            bestScore = score;
+            bestMetadata = metadata;
+            lastImprovedAt = Date.now();
+            if (!firstMetadataAt) firstMetadataAt = lastImprovedAt;
+          }
+          if (bestScore <= 0) return false;
+          const hasTaxonomyHeadings = [...doc.querySelectorAll('h1,h2,h3,h4,h5,h6')]
+            .some(node => /^(genres|themes)$/i.test(String(node.textContent || '').trim()));
+          const ratingControlsReady = [...doc.querySelectorAll('button')]
+            .filter(button => button.querySelector('svg[data-testid="StarIcon"]'))
+            .some(button => String(button.style.color || '').trim());
+          if (hasTaxonomyHeadings
+            && ratingControlsReady
+            && Date.now() - lastImprovedAt >= 75
+            && Date.now() - firstMetadataAt >= 300) {
+            finish(resolve, bestMetadata);
+            return true;
+          }
+          return false;
+        } catch (error) {
+          finish(reject, error);
+          return true;
+        }
+      }
+
+      iframe.style.cssText = 'position:absolute;width:1280px;height:900px;left:-10000px;top:0;border:0;opacity:0;pointer-events:none;';
+      iframe.addEventListener('load', () => {
+        tryRead();
+      });
+      interval = setInterval(tryRead, 50);
+      timeout = setTimeout(() => {
+        finish(reject, new Error(`Timed out rendering ${url}`));
+      }, timeoutMs);
+      document.body.appendChild(iframe);
+      iframe.src = url;
+    });
+  }
+
+  function withIgdbRenderedListDocument(url, timeoutMs = 30000) {
+    return new Promise((resolve, reject) => {
+      const iframe = document.createElement('iframe');
+      let settled = false;
+      let interval = null;
+      let timeout = null;
+
+      function cleanup() {
+        if (interval) clearInterval(interval);
+        if (timeout) clearTimeout(timeout);
+        iframe.remove();
+      }
+
+      function finish(fn, value) {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        fn(value);
+      }
+
+      function tryRead() {
+        try {
+          checkExportCancelled();
+          const doc = iframe.contentDocument;
+          if (!doc || doc.readyState === 'loading') return false;
+          const hasEntries = !!doc.querySelector('script[data-component-name="ListEntry"]');
+          const pagination = doc.querySelector('script[data-component-name="Pagination"]');
+          const hasListContainer = !!doc.querySelector('.panel-body.listentries');
+          if (!hasEntries && !(pagination && hasListContainer)) return false;
+          const html = doc.documentElement && doc.documentElement.outerHTML;
+          if (!html) return false;
+          finish(resolve, new DOMParser().parseFromString(html, 'text/html'));
+          return true;
+        } catch (error) {
+          finish(reject, error);
+          return true;
+        }
+      }
+
+      iframe.style.cssText = 'position:absolute;width:1280px;height:900px;left:-10000px;top:0;border:0;opacity:0;pointer-events:none;';
+      iframe.addEventListener('load', tryRead);
+      interval = setInterval(tryRead, 100);
+      timeout = setTimeout(() => {
+        finish(reject, new Error(`Timed out rendering IGDB list ${url}`));
+      }, timeoutMs);
+      document.body.appendChild(iframe);
+      iframe.src = url;
+    });
+  }
+
+  async function enrichIgdbItemsFromRenderedGamePages(items) {
+    const list = Array.isArray(items) ? items : [];
+    const missing = [];
+    const failed = [];
+    let enriched = 0;
+    let completed = 0;
+
+    const concurrency = loadRequestDelaySettings('igdb').concurrency;
+    await mapWithConcurrency(list, concurrency, async (item, index) => {
+      checkExportCancelled();
+      await waitIfExportPaused();
+      addLog(
+        `IGDB Advanced: rendered ${completed} of ${list.length}; loading ${item.title || `game ${index + 1}`}`,
+        'info',
+        'igdb-advanced-progress'
+      );
+      try {
+        await waitForRequestSlot('igdb', IGDB_REQUEST_DELAY_MIN_MS, IGDB_REQUEST_DELAY_MAX_MS);
+        const metadata = await withIgdbRenderedGameDocument(item.url);
+        if (applyIgdbGamePageMetadata(item, metadata)) enriched += 1;
+        else missing.push(item.title || item.url || 'Unknown game');
+        if (metadata.userRating != null) {
+          addLog(
+            `IGDB Advanced: ${item.title || 'Game'} personal rating ${metadata.userRating}`,
+            'info',
+            'igdb-advanced-rating'
+          );
+        }
+      } catch (error) {
+        if (isExportCancelledError(error)) throw error;
+        failed.push({
+          game: item.title || item.url || 'Unknown game',
+          error: error && error.message ? error.message : String(error),
+        });
+      }
+      completed += 1;
+      setProgressInStage('advanced', completed, list.length, 20, 95);
+    });
+    removeLog('igdb-advanced-progress');
+    return { enriched, missing, failed };
+  }
+
+  function parseIgdbListDocument(doc, pageUrl, config = statusPillConfig) {
+    const mappings = getIgdbConfiguredStatusMappings(config);
+    const useListSources = [...mappings.values()].some(mapping => /\/users\/[^/]+\/lists\/[^/?#]+/i.test(mapping.collection.url));
+    const url = new URL(pageUrl, 'https://www.igdb.com');
+    const listSlug = url.pathname.match(/\/lists\/([^/?#]+)/i)?.[1] || '';
+    const discoveredList = (igdbListCollectionsCache || []).find(entry => entry.slug === listSlug);
+    const listDefinition = discoveredList || IGDB_LIST_DEFINITIONS.find(entry => entry.slug === listSlug);
+    const headerData = parseIgdbReactComponent(doc.querySelector('script[data-component-name="WrappedHeader"]'));
+    const paginationData = parseIgdbReactComponent(doc.querySelector('script[data-component-name="Pagination"]'));
+    const username = String(headerData && headerData.user && (headerData.user.username || headerData.user.slug) || getIgdbUserSlug(pageUrl)).trim();
+    const items = [];
+    const rawStatusCounts = {};
+    const actualStatusCounts = {};
+    let cardCount = 0;
+
+    doc.querySelectorAll('script[data-component-name="ListEntry"]').forEach(script => {
+      const data = parseIgdbReactComponent(script);
+      const game = data && data.game;
+      const selectedListEntries = data && data.listEntryData && Array.isArray(data.listEntryData.selectedListEntries)
+        ? data.listEntryData.selectedListEntries
+        : [];
+      const listEntry = selectedListEntries.find(entry =>
+        String(entry && entry.list && entry.list.name || '').trim().toLowerCase() ===
+        String(listDefinition && listDefinition.name || '').trim().toLowerCase()
+      ) || selectedListEntries[0] || null;
+      if (!game || !game.title || !game.url) return;
+      cardCount += 1;
+      const explicitStatus = String(listEntry && listEntry.listEntryStatus && listEntry.listEntryStatus.name || '').trim();
+      const noStatus = String(listDefinition && listDefinition.noStatus || '').trim();
+      const actualStatus = explicitStatus || noStatus;
+      if (actualStatus) actualStatusCounts[actualStatus] = (actualStatusCounts[actualStatus] || 0) + 1;
+      const listSource = String(listDefinition && listDefinition.name || '').trim();
+      const rawStatus = mappings.has(actualStatus.toLowerCase())
+        ? actualStatus
+        : useListSources
+          ? listSource
+          : actualStatus;
+      if (rawStatus) rawStatusCounts[rawStatus] = (rawStatusCounts[rawStatus] || 0) + 1;
+      const mapping = mappings.get(rawStatus.toLowerCase());
+      if (!mapping) return;
+      const coverUrl = String(game.coverSrc || '').trim();
+      const releaseYear = Number(game.year);
+      const platformReleases = (data && data.listEntryData && Array.isArray(data.listEntryData.platforms)
+        ? data.listEntryData.platforms
+        : [])
+        .map(normalizeIgdbPlatformRelease)
+        .filter(Boolean);
+      const platforms = uniqueSortedLabels(platformReleases.map(release => release.platform));
+      const releaseDate = getIgdbCanonicalReleaseDate(
+        platformReleases,
+        Number.isFinite(releaseYear) ? releaseYear : ''
+      );
+      items.push({
+        game_id: game.id == null ? '' : String(game.id),
+        title: String(game.title).trim(),
+        url: new URL(String(game.url), pageUrl).href,
+        cover_url: coverUrl.startsWith('//') ? `https:${coverUrl}` : coverUrl,
+        release_date: releaseDate,
+        release_year: Number.isFinite(releaseYear) ? releaseYear : null,
+        platforms,
+        platform_releases: platformReleases,
+        status: mapping.status,
+        statuses: [mapping.status],
+        status_id: mapping.statusId,
+        status_ids: mapping.statusId ? [mapping.statusId] : [],
+        statusColor: mapping.color,
+        list: String(listEntry && listEntry.list && listEntry.list.name || listDefinition && listDefinition.name || '').trim(),
+        list_slug: listDefinition ? listDefinition.slug : '',
+        source_status: rawStatus,
+      });
+    });
+
+    return {
+      username,
+      items,
+      cardCount,
+      totalPages: Math.max(1, Number(paginationData && paginationData.totalPages) || 1),
+      signature: items.map(item => item.game_id || item.url).join('|'),
+      list: listDefinition || null,
+      rawStatusCounts,
+      actualStatusCounts,
+    };
+  }
+
+  function normalizeIgdbSharedExportItem(rawItem) {
+    const sourceMeta = rawItem && rawItem.source_meta && typeof rawItem.source_meta === 'object'
+      ? rawItem.source_meta
+      : {};
+    const item = normalizeSharedExportItem(rawItem, { defaultStatus: '' });
+    const statuses = exportListFromValue(rawItem.statuses || rawItem.status);
+    const statusIds = exportListFromValue(rawItem.status_ids || rawItem.statusIds || rawItem.status_id || sourceMeta.status_ids);
+    item.status = statuses[0] || item.status || '';
+    item.statuses = statuses.length ? statuses : (item.status ? [item.status] : []);
+    item.statusId = statusIds[0] || '';
+    item.status_id = item.statusId;
+    item.statusIds = statusIds;
+    item.status_ids = statusIds;
+    item.platforms = uniqueSortedLabels(rawItem.platforms || item.platforms || []);
+    item.platform_releases = Array.isArray(rawItem.platform_releases)
+      ? rawItem.platform_releases
+      : Array.isArray(sourceMeta.platform_releases)
+        ? sourceMeta.platform_releases
+        : [];
+    item.genres = uniqueSortedLabels((rawItem.genres || item.genres || []).map(normalizeIgdbTaxonomyLabel));
+    item.average_rating = normalizeAverageRatingValue(
+      rawItem.average_rating === undefined ? item.average_rating : rawItem.average_rating
+    );
+    const existingReleaseDate = /^0000-/.test(String(item.release_date || '')) ? '' : item.release_date;
+    const releaseYearMatch = String(existingReleaseDate || '').match(/^(\d{4})/);
+    item.release_year = rawItem.release_year || sourceMeta.release_year || (releaseYearMatch ? releaseYearMatch[1] : '');
+    item.release_date = getIgdbCanonicalReleaseDate(
+      item.platform_releases,
+      existingReleaseDate || item.release_year
+    );
+    item.source_meta = {
+      ...sourceMeta,
+      game_id: rawItem.game_id || sourceMeta.game_id || '',
+      list: rawItem.list || sourceMeta.list || '',
+      list_slug: rawItem.list_slug || sourceMeta.list_slug || '',
+      source_status: rawItem.source_status || sourceMeta.source_status || '',
+      status_ids: statusIds,
+      platform_releases: item.platform_releases,
+      igdb_genres: uniqueSortedLabels((rawItem.igdb_genres || sourceMeta.igdb_genres || []).map(normalizeIgdbTaxonomyLabel)),
+      igdb_themes: uniqueSortedLabels((rawItem.igdb_themes || sourceMeta.igdb_themes || []).map(normalizeIgdbTaxonomyLabel)),
+      rating_count_label: rawItem.rating_count_label || sourceMeta.rating_count_label || '',
+    };
+    return item;
+  }
+
+  function buildIgdbPayload(items, username, config, source) {
+    const normalizedItems = (items || []).map(normalizeIgdbSharedExportItem);
+    const mappings = [...getIgdbConfiguredStatusMappings(config).values()];
+    const collectionCounts = new Map();
+    normalizedItems.forEach(item => {
+      const rawStatus = String(item.source_meta && item.source_meta.source_status || '').toLowerCase();
+      if (rawStatus) collectionCounts.set(rawStatus, (collectionCounts.get(rawStatus) || 0) + 1);
+    });
+    return normalizeSharedExportPayload({
+      sourceWebsite: getSourceWebsite('igdb'),
+      username,
+      source,
+      generated_at: new Date().toISOString(),
+      status_pill_config: config,
+      collections: mappings.map(mapping => ({
+        name: mapping.rawStatus,
+        games: collectionCounts.get(mapping.rawStatus.toLowerCase()) || 0,
+        url: mapping.collection.url,
+        status: mapping.status,
+      })),
+      include_genres: normalizedItems.some(item => item.genres.length),
+      include_platforms: normalizedItems.some(item => item.platforms.length),
+      igdb_genre_labels: IGDB_GENRE_LABELS,
+      igdb_platform_labels: IGDB_PLATFORM_LABELS,
+      total: normalizedItems.length,
+      items: normalizedItems,
+    }, {
+      sourceWebsite: getSourceWebsite('igdb'),
+      username,
+      source,
+      defaultStatus: '',
+    });
+  }
+
   function getMobyGamesItemIdentity(item) {
     return String(mobyItemUrl(item) || item.name || item.title || '')
       .trim()
@@ -4763,7 +7871,7 @@ ZX81`
       const aOrder = a.id && statusOrder.has(a.id) ? statusOrder.get(a.id) : Number.MAX_SAFE_INTEGER;
       const bOrder = b.id && statusOrder.has(b.id) ? statusOrder.get(b.id) : Number.MAX_SAFE_INTEGER;
       if (aOrder !== bOrder) return aOrder - bOrder;
-      return String(a.label || '').localeCompare(String(b.label || ''), undefined, { sensitivity: 'base', numeric: true });
+      return compareNatural(a.label, b.label);
     });
   }
 
@@ -4961,8 +8069,8 @@ ZX81`
       enhanced_metadata_failures: state.enhancedMetadataFailures || [],
       total: items.length,
       items: items.sort((a, b) =>
-        String(a.name || '').localeCompare(String(b.name || ''), undefined, { sensitivity: 'base', numeric: true }) ||
-        String(a.platform || '').localeCompare(String(b.platform || ''), undefined, { sensitivity: 'base', numeric: true })
+        compareNatural(a.name, b.name) ||
+        compareNatural(a.platform, b.platform)
       ),
     };
   }
@@ -5030,14 +8138,29 @@ ZX81`
     });
   }
 
-  async function resumeMobyGamesExportIfNeeded() {
+  function resumeMobyGamesExportIfNeeded() {
+    if (mobyGamesResumePromise) return mobyGamesResumePromise;
+    mobyGamesResumePromise = resumeMobyGamesExportOnce().finally(() => {
+      mobyGamesResumePromise = null;
+    });
+    return mobyGamesResumePromise;
+  }
+
+  async function resumeMobyGamesExportOnce() {
     if (!isMobyGamesHost()) return;
+    if (storageGet(MOBYGAMES_EXPORT_CANCEL_KEY, '0') === '1') {
+      storageRemove(MOBYGAMES_EXPORT_CANCEL_KEY);
+      clearMobyGamesExportState();
+      flushPendingNavMessage();
+      return;
+    }
     if (isBrowserReloadNavigation()) {
       clearMobyGamesExportState();
       return;
     }
     const state = loadMobyGamesExportState();
     if (!state || state.phase === 'idle') return;
+    setActiveExportProgressPlan(makeBasicAdvancedProgressPlan(!!state.includeEnhancedMetadata));
 
     panel.classList.add('is-active');
     clearExportLog();
@@ -5054,10 +8177,11 @@ ZX81`
     syncRunControls();
     syncMobyGamesConfigButtonDisabledState();
     updatePendingFileFormatNote();
-    setProgress(10);
+    setProgressAtStageStart('basic', 1, 20);
 
     try {
       if (state.phase === 'finalize') {
+        setProgressAtStageEnd('basic', 1, 20);
         addLog(`MobyGames selected collections: ${(state.mappings || []).map(mapping => `${mapping.collection.name} -> ${mapping.status}`).join(', ')}`);
         (state.collectionCounts || []).forEach(entry => addLog(`Scraped ${entry.count} games from ${entry.collection}`));
         if ((state.failures || []).length) addLog(`MobyGames failed collections: ${state.failures.map(failure => failure.collection).join(', ')}`, 'error');
@@ -5073,12 +8197,12 @@ ZX81`
         const payload = buildMobyGamesPayloadFromState(state);
         const finalFormats = getMobyGamesExportFormatsForDownload(state);
         const formatDownload = prepareFormatsForDownload(finalFormats);
-        addLog(`MobyGames total games exported: ${payload.items.length}`);
         if (formatDownload.canDownload) {
           await downloadMobyGamesPayload(payload, finalFormats, state.username, {
             includeOfflineCovers: !!state.includeOfflineCovers,
           });
         }
+        addLog(`MobyGames total games exported: ${payload.items.length}`);
         clearMobyGamesExportState();
         setProgress(100);
         addLog(`Finished: ${payload.items.length} MobyGames games exported`);
@@ -5104,6 +8228,7 @@ ZX81`
       addLog(`Scraping ${mapping.collection.name} (${mapping.status}) from rendered page...`);
 
       const renderedCollection = await scrapeCurrentRenderedMobyGamesCollection(mapping);
+      checkExportCancelled();
 
       const existingItems = Array.isArray(state.items) ? state.items : [];
       const nextItems = [...existingItems, ...renderedCollection.games];
@@ -5125,12 +8250,14 @@ ZX81`
       state.collectionCounts.push({ collection: mapping.collection.name, status: mapping.status, count: renderedCollection.games.length });
       const nextIndex = (state.currentIndex || 0) + 1;
       state.currentIndex = nextIndex;
-      setProgress(Math.min(92, 15 + Math.round((nextIndex / Math.max(1, state.mappings.length)) * 75)));
+      setProgressInStage('basic', nextIndex, Math.max(1, state.mappings.length), 1, 20);
       if (nextIndex >= state.mappings.length) {
+        checkExportCancelled();
         state.phase = 'finalize';
         saveMobyGamesExportState(state);
         location.href = state.startUrl;
       } else {
+        checkExportCancelled();
         state.phase = 'scrape';
         saveMobyGamesExportState(state);
         location.href = state.mappings[nextIndex].collection.url;
@@ -5158,12 +8285,19 @@ ZX81`
 
   async function resumeHowLongToBeatExportIfNeeded() {
     if (!isHowLongToBeatHost()) return;
+    if (storageGet(HLTB_EXPORT_CANCEL_KEY, '0') === '1') {
+      storageRemove(HLTB_EXPORT_CANCEL_KEY);
+      clearHowLongToBeatExportState();
+      flushPendingNavMessage();
+      return;
+    }
     if (isBrowserReloadNavigation()) {
       clearHowLongToBeatExportState();
       return;
     }
     const state = loadHowLongToBeatExportState();
     if (!state || state.phase === 'idle') return;
+    setActiveExportProgressPlan(makeBasicAdvancedProgressPlan(!!state.includeEnhancedMetadata));
 
     panel.classList.add('is-active');
     clearExportLog();
@@ -5186,11 +8320,12 @@ ZX81`
     syncRunControls();
     syncMobyGamesConfigButtonDisabledState();
     updatePendingFileFormatNote();
-    setProgress(10);
+    setProgressAtStageStart('basic', 1, 20);
     if (state.configPreflight) setHowLongToBeatPreflightWait(true);
 
     try {
       if (state.phase === 'finalize') {
+        setProgressAtStageEnd('basic', 1, 20);
         addLog(`HowLongToBeat selected categories: ${(state.mappings || []).map(mapping => `${mapping.collection.name} -> ${mapping.status}`).join(', ')}`);
         (state.categoryCounts || []).forEach(entry => addLog(`Scraped ${entry.count} games from ${entry.category}`));
         if ((state.failures || []).length) addLog(`HowLongToBeat failed categories: ${state.failures.map(failure => failure.category).join(', ')}`, 'error');
@@ -5270,10 +8405,14 @@ ZX81`
       const currentPage = Number(state.currentPage || 1);
       addLog(`HowLongToBeat selected categories: ${mappings.map(entry => `${entry.collection.name} -> ${entry.status}`).join(', ')}`);
       addLog(`Scraping ${mapping.collection.name} (${mapping.status}) page ${currentPage}...`);
-      await waitForHowLongToBeatGameList(60000);
+      const collectionsTarget = isHowLongToBeatCollectionsTarget(mapping.collection.url);
+      await ensureHowLongToBeatListBoxView({ collectionsTarget });
+      await waitForHowLongToBeatGameList(60000, { collectionsTarget });
       checkExportCancelled();
-      const parsed = parseHowLongToBeatGamesDocument(document, location.href, mapping);
-      const signature = getHowLongToBeatRowsSignature(mapping);
+      const parsed = collectionsTarget
+        ? parseHowLongToBeatCollectionGamesDocument(document, location.href, mapping)
+        : parseHowLongToBeatGamesDocument(document, location.href, mapping);
+      const signature = (parsed.games || []).map(game => `${game.gameUrl}|${game.platform}`).join('||');
       const pageSignatures = Array.isArray(state.pageSignatures) ? state.pageSignatures : [];
       const repeatedPage = !!signature && pageSignatures.includes(signature);
       const hitPageCap = currentPage >= 100;
@@ -5293,7 +8432,8 @@ ZX81`
         state.pageSignatures = pageSignatures;
       }
 
-      if (repeatedPage || hitPageCap || !signature || !parsed.games.length) {
+      if (collectionsTarget || repeatedPage || hitPageCap || !signature || !parsed.games.length) {
+        checkExportCancelled();
         const categoryItems = (Array.isArray(state.items) ? state.items : [])
           .filter(item => item.category_url === mapping.collection.url && item.statusId === mapping.statusId);
         state.categoryCounts = Array.isArray(state.categoryCounts) ? state.categoryCounts : [];
@@ -5302,21 +8442,26 @@ ZX81`
         state.currentIndex = nextIndex;
         state.currentPage = 1;
         state.pageSignatures = [];
-        setProgress(Math.min(92, 15 + Math.round((nextIndex / Math.max(1, mappings.length)) * 75)));
+        setProgressInStage('basic', nextIndex, Math.max(1, mappings.length), 1, 20);
         if (nextIndex >= mappings.length) {
+          checkExportCancelled();
           state.phase = 'finalize';
           saveHowLongToBeatExportState(state);
           location.href = state.startUrl;
         } else {
+          checkExportCancelled();
           state.phase = 'scrape';
           saveHowLongToBeatExportState(state);
-          location.href = getHowLongToBeatPageUrl(mappings[nextIndex].collection.url, 1);
+          location.href = isHowLongToBeatCollectionsTarget(mappings[nextIndex].collection.url)
+            ? mappings[nextIndex].collection.url
+            : getHowLongToBeatPageUrl(mappings[nextIndex].collection.url, 1);
         }
         return;
       }
 
       state.currentPage = currentPage + 1;
       state.phase = 'scrape';
+      checkExportCancelled();
       saveHowLongToBeatExportState(state);
       addLog(`Scraped ${parsed.games.length} games from ${mapping.collection.name} page ${currentPage}; loading next page...`);
       location.href = getHowLongToBeatPageUrl(mapping.collection.url, state.currentPage);
@@ -5332,8 +8477,20 @@ ZX81`
   }
 
   function renderStatusPillConfigModal() {
-    if (statusPillConfigModal) statusPillConfigModal.remove();
+    if (statusPillConfigModal) removeAccessibleModal(statusPillConfigModal);
     panel.classList.add('bgd-config-open');
+    const statusConfigDescriptor = getSourceStatusConfigDescriptorForHost();
+    const loadAllCounts = statusConfigDescriptor && statusConfigDescriptor.loadAllCounts;
+    const showLoadAllCounts = typeof loadAllCounts === 'function';
+    const loadAllCountsLabel = statusConfigDescriptor && statusConfigDescriptor.loadAllCountsLabel
+      ? statusConfigDescriptor.loadAllCountsLabel
+      : DEFAULT_STATUS_CONFIG.loadAllCountsLabel;
+    const showLoadAllCountsTooltip = !statusConfigDescriptor
+      || statusConfigDescriptor.showLoadAllCountsTooltip !== false;
+    const loadAllCountsTooltip = statusConfigDescriptor && statusConfigDescriptor.loadAllCountsTooltip
+      ? statusConfigDescriptor.loadAllCountsTooltip
+      : DEFAULT_STATUS_CONFIG.loadAllCountsTooltip;
+    const activeSourceId = getSourceDescriptorForHost().id;
     const modal = document.createElement('div');
     modal.className = 'bgd-status-config-modal';
     modal.innerHTML = `
@@ -5343,37 +8500,127 @@ ZX81`
           <span>Configure the status groups used by the exported HTML.</span>
         </div>
         <div class="bgd-status-config-buttons">
-          <button class="bgd-status-config-small" type="button" id="bgdStatusConfigDefault">Default</button>
+          <span class="bgd-status-config-tooltip-wrap">
+            <button class="bgd-status-config-small" type="button" id="bgdStatusConfigDefault" aria-describedby="bgdStatusConfigDefaultTip">Default</button>
+            <span class="bgd-status-config-tooltip" id="bgdStatusConfigDefaultTip" role="tooltip">Restore default pills and order.</span>
+          </span>
+          ${showLoadAllCounts ? `
+            <span class="${showLoadAllCountsTooltip ? 'bgd-status-config-tooltip-wrap' : ''}">
+              <button class="bgd-status-config-small" type="button" id="bgdStatusConfigLoadCounts"${showLoadAllCountsTooltip ? ' aria-describedby="bgdStatusConfigLoadCountsTip"' : ''}>${escapeHtml(loadAllCountsLabel)}</button>
+              ${showLoadAllCountsTooltip ? `<span class="bgd-status-config-tooltip" id="bgdStatusConfigLoadCountsTip" role="tooltip">${escapeHtml(loadAllCountsTooltip)}</span>` : ''}
+            </span>
+          ` : ''}
           <button class="bgd-status-config-small bgd-status-config-x" type="button" id="bgdStatusConfigX" title="Close" aria-label="Close">X</button>
         </div>
       </div>
-      <div class="bgd-status-config-tip">Tip: Drag and drop pills with the left mouse button to reorder them.</div>
+      <div class="bgd-status-config-utility-row">
+        <div class="bgd-status-config-tip">Tip: Drag and drop pills with the left mouse button to reorder them.</div>
+      </div>
+      <div class="bgd-request-rate-section">
+        <div class="bgd-request-rate-heading">
+          <span>Set Page Request Rate</span>
+          <span class="bgd-request-rate-conversion">1000ms = 1s</span>
+        </div>
+        <div class="bgd-request-delay-control">
+          <div class="bgd-request-delay-inputs">
+            <label class="bgd-request-delay-field is-min">
+              <span>Delay</span>
+              <input class="bgd-request-delay-input" type="number" min="0" max="99999" step="1" inputmode="numeric" aria-label="Minimum request delay in milliseconds">
+            </label>
+            <span class="bgd-request-delay-note">to</span>
+            <label class="bgd-request-delay-field is-max">
+              <input class="bgd-request-delay-input" type="number" min="0" max="99999" step="1" inputmode="numeric" aria-label="Maximum request delay in milliseconds">
+              <span>ms</span>
+            </label>
+          </div>
+          <span class="bgd-request-delay-divider" aria-hidden="true"></span>
+          <div class="bgd-request-pages-control">
+            <label class="bgd-request-pages-value">
+              <input class="bgd-request-delay-input" type="number" min="1" max="99" step="1" inputmode="numeric" aria-label="Detail pages loaded at once">
+            </label>
+            <span class="bgd-request-pages-label">Pages</span>
+            <span class="bgd-request-pages-note">/req.</span>
+          </div>
+          <button class="bgd-request-delay-reset" type="button" title="Reset request settings to this site's defaults" aria-label="Reset request settings"><svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M3.2 5.4A5.5 5.5 0 1 1 2.7 9" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><path d="M2.8 2.8v3.4h3.4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        </div>
+      </div>
       <div class="bgd-status-config-grid"></div>
     `;
     panel.appendChild(modal);
     statusPillConfigModal = modal;
 
-    function rerender() {
+    const delayControl = modal.querySelector('.bgd-request-delay-control');
+    const delayMinInput = delayControl.querySelector('.bgd-request-delay-field.is-min input');
+    const delayMaxInput = delayControl.querySelector('.bgd-request-delay-field.is-max input');
+    const concurrencyInput = delayControl.querySelector('.bgd-request-pages-value input');
+    const delayResetButton = delayControl.querySelector('.bgd-request-delay-reset');
+    const requestDefaults = getSourceRequestDefaults(activeSourceId);
+    let requestDelaySettings = loadRequestDelaySettings(activeSourceId);
+
+    function renderRequestDelayControl() {
+      const { minMs, maxMs, concurrency } = requestDelaySettings;
+      delayMinInput.value = String(minMs);
+      delayMaxInput.value = String(maxMs);
+      concurrencyInput.value = String(concurrency);
+    }
+
+    function persistRequestDelayControl() {
+      requestDelaySettings = saveRequestDelaySettings(activeSourceId, requestDelaySettings);
+      renderRequestDelayControl();
+    }
+
+    delayMinInput.addEventListener('change', event => {
+      const value = Number(event.target.value);
+      requestDelaySettings.minMs = value;
+      if (value > requestDelaySettings.maxMs) requestDelaySettings.maxMs = value;
+      persistRequestDelayControl();
+    });
+    delayMaxInput.addEventListener('change', event => {
+      const value = Number(event.target.value);
+      requestDelaySettings.maxMs = value;
+      if (value < requestDelaySettings.minMs) requestDelaySettings.minMs = value;
+      persistRequestDelayControl();
+    });
+    concurrencyInput.addEventListener('change', event => {
+      requestDelaySettings.concurrency = Number(event.target.value);
+      persistRequestDelayControl();
+    });
+    delayResetButton.addEventListener('click', () => {
+      requestDelaySettings = { ...requestDefaults };
+      persistRequestDelayControl();
+    });
+    renderRequestDelayControl();
+
+    function rerender(categoryIndexes = null) {
       saveStatusPillConfig();
       const grid = modal.querySelector('.bgd-status-config-grid');
-      grid.innerHTML = '';
+      const targetedIndexes = Array.isArray(categoryIndexes) ? new Set(categoryIndexes) : null;
+      if (!targetedIndexes) grid.innerHTML = '';
       statusPillConfig.categories.forEach((category, categoryIndex) => {
+        if (targetedIndexes && !targetedIndexes.has(categoryIndex)) return;
         category.pills = (category.pills || []).filter(Boolean).slice(0, STATUS_PILL_SLOT_COUNT);
         const totalCount = category.pills.length;
         const isFull = totalCount >= STATUS_PILL_SLOT_COUNT;
         const categoryEl = document.createElement('section');
         categoryEl.className = 'bgd-status-category';
+        categoryEl.dataset.categoryIndex = String(categoryIndex);
         categoryEl.innerHTML = `
           <div class="bgd-status-category-head">
-            <strong>${escapeHtml(category.label || `Group ${categoryIndex + 1}`)}</strong>
+            <strong></strong>
             <div class="bgd-status-category-actions">
-              <button type="button" data-add-aggregate>+ Total</button>
-              <button type="button" data-add-status>+ Status</button>
+              <button type="button" data-add-aggregate><span class="bgd-status-add-icon" aria-hidden="true">+</span>Total</button>
+              <button type="button" data-add-status><span class="bgd-status-add-icon" aria-hidden="true">+</span>Status</button>
             </div>
           </div>
           <div class="bgd-config-pill-list"></div>
-          ${isFull ? `<div class="bgd-status-limit">This group has reached its maximum capacity of ${STATUS_PILL_SLOT_COUNT} pills.</div>` : ''}
         `;
+        categoryEl.querySelector('strong').textContent = category.label || `Group ${categoryIndex + 1}`;
+        if (isFull) {
+          const limit = document.createElement('div');
+          limit.className = 'bgd-status-limit';
+          limit.textContent = `This group has reached its maximum capacity of ${STATUS_PILL_SLOT_COUNT} pills.`;
+          categoryEl.appendChild(limit);
+        }
         const addAggregateBtn = categoryEl.querySelector('[data-add-aggregate]');
         const addStatusBtn = categoryEl.querySelector('[data-add-status]');
         addAggregateBtn.disabled = isFull;
@@ -5386,11 +8633,11 @@ ZX81`
             label: 'Aggregate Pill',
             sources: getAllStatusPillsFromConfig().slice(0, 2).map(pill => pill.id),
           });
-          rerender();
+          rerender([categoryIndex]);
         });
         addStatusBtn.addEventListener('click', () => {
           if (category.pills.length >= STATUS_PILL_SLOT_COUNT) return;
-          const fallback = STATUS_PILL_SOURCE_DEFS.played;
+          const fallback = STATUS_PILL_SOURCE_DEFS['played-sub'];
           category.pills.push({
             id: makeConfigPillId('status'),
             kind: 'status',
@@ -5399,7 +8646,7 @@ ZX81`
             source: { type: fallback.type, value: fallback.value },
             collections: [],
           });
-          rerender();
+          rerender([categoryIndex]);
         });
 
         const list = categoryEl.querySelector('.bgd-config-pill-list');
@@ -5457,7 +8704,7 @@ ZX81`
             const nextSlots = compactedFromSlots.slice();
             if (!insertPillIntoSlot(nextSlots, targetSlotIndex, moved)) return;
             rebuildCategoryFromSlots(targetCategory, nextSlots);
-            rerender();
+            rerender([targetCategoryIndex]);
             return;
           }
 
@@ -5465,7 +8712,7 @@ ZX81`
           if (!insertPillIntoSlot(targetSlots, targetSlotIndex, moved)) return;
           rebuildCategoryFromSlots(fromCategory, compactedFromSlots);
           rebuildCategoryFromSlots(targetCategory, targetSlots);
-          rerender();
+          rerender([fromCategoryIndex, targetCategoryIndex]);
         }
 
         function clearSlotHighlights() {
@@ -5491,11 +8738,11 @@ ZX81`
                 <circle cx="11" cy="16" r="1.2"></circle>
               </svg>
             </span>
-            ${pill.kind === 'status' ? `<input class="bgd-config-color" type="color" value="${escapeHtml(pill.color || '#7dd3fc')}" title="Pick color">` : ''}
-            <input class="bgd-config-label" type="text" value="${escapeHtml(pill.label || '')}" aria-label="Pill label">
+            ${pill.kind === 'status' ? '<input class="bgd-config-color" type="color" title="Pick color">' : ''}
+            <input class="bgd-config-label" type="text" aria-label="Pill label">
             <div class="bgd-config-pill-actions">
-              <span class="bgd-config-count">${getConfigPillCount(pill)}</span>
-              <button class="bgd-config-sources" type="button" title="${pill.kind === 'aggregate' ? 'Configure aggregate sources' : 'Status pill settings'}" aria-label="${pill.kind === 'aggregate' ? 'Configure included status pills' : 'Status pill settings'}">
+              <span class="bgd-config-count"></span>
+              <button class="bgd-config-sources" type="button">
                 <svg class="bgd-config-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
                   <path d="M12 15.5A3.5 3.5 0 1 0 12 8a3.5 3.5 0 0 0 0 7.5Z"></path>
                   <path d="M19.4 15a1.8 1.8 0 0 0 .36 1.98l.05.05a2.1 2.1 0 0 1-2.97 2.97l-.05-.05a1.8 1.8 0 0 0-1.98-.36 1.8 1.8 0 0 0-1.08 1.65V21.3a2.1 2.1 0 0 1-4.2 0v-.08a1.8 1.8 0 0 0-1.08-1.65 1.8 1.8 0 0 0-1.98.36l-.05.05a2.1 2.1 0 0 1-2.97-2.97l.05-.05A1.8 1.8 0 0 0 4.6 15a1.8 1.8 0 0 0-1.65-1.08H2.9a2.1 2.1 0 0 1 0-4.2h.08A1.8 1.8 0 0 0 4.6 8.64a1.8 1.8 0 0 0-.36-1.98l-.05-.05a2.1 2.1 0 0 1 2.97-2.97l.05.05a1.8 1.8 0 0 0 1.98.36A1.8 1.8 0 0 0 10.27 2.4V2.1a2.1 2.1 0 0 1 4.2 0v.08a1.8 1.8 0 0 0 1.08 1.65 1.8 1.8 0 0 0 1.98-.36l.05-.05a2.1 2.1 0 0 1 2.97 2.97l-.05.05a1.8 1.8 0 0 0-.36 1.98 1.8 1.8 0 0 0 1.65 1.08h.08a2.1 2.1 0 0 1 0 4.2h-.08A1.8 1.8 0 0 0 19.4 15Z"></path>
@@ -5510,25 +8757,32 @@ ZX81`
           `;
           const colorInput = pillEl.querySelector('.bgd-config-color');
           if (colorInput) {
+            colorInput.value = pill.color || '#7dd3fc';
             colorInput.addEventListener('input', event => {
               pill.color = event.target.value;
               saveStatusPillConfig();
             });
           }
-          pillEl.querySelector('.bgd-config-label').addEventListener('input', event => {
+          const labelInput = pillEl.querySelector('.bgd-config-label');
+          labelInput.value = pill.label || '';
+          pillEl.querySelector('.bgd-config-count').textContent = String(getConfigPillCount(pill));
+          const sourceButton = pillEl.querySelector('.bgd-config-sources');
+          sourceButton.title = pill.kind === 'aggregate' ? 'Configure aggregate sources' : 'Status pill settings';
+          sourceButton.setAttribute('aria-label', pill.kind === 'aggregate' ? 'Configure included status pills' : 'Status pill settings');
+          labelInput.addEventListener('input', event => {
             pill.label = event.target.value;
             saveStatusPillConfig();
           });
-          pillEl.querySelector('.bgd-config-label').addEventListener('dragstart', event => {
+          labelInput.addEventListener('dragstart', event => {
             event.stopPropagation();
           });
-          const sourceBtn = pillEl.querySelector('.bgd-config-sources');
+          const sourceBtn = sourceButton;
           if (sourceBtn) sourceBtn.addEventListener('click', () => {
             if (pill.kind === 'aggregate') {
-              openAggregateSourcesModal(pill, rerender);
+              openAggregateSourcesModal(pill, () => rerender(getPillAffectedCategoryIndexes(pill)));
               return;
             }
-            openStatusCollectionsModal(pill, rerender);
+            openStatusCollectionsModal(pill, () => rerender(getPillAffectedCategoryIndexes(pill)));
           });
           pillEl.querySelector('.bgd-config-remove').addEventListener('click', () => {
             category.pills = (category.pills || []).filter(candidate => candidate !== pill);
@@ -5539,7 +8793,7 @@ ZX81`
                 }
               });
             });
-            rerender();
+            rerender([categoryIndex]);
           });
           const dragHandle = pillEl.querySelector('.bgd-config-drag-handle');
           dragHandle.draggable = true;
@@ -5588,61 +8842,130 @@ ZX81`
           if (pill) renderPillInSlot(slotEl, pill, slotIndex);
           list.appendChild(slotEl);
         }
-        grid.appendChild(categoryEl);
+        const currentCategoryEl = grid.querySelector(`.bgd-status-category[data-category-index="${categoryIndex}"]`);
+        if (currentCategoryEl) currentCategoryEl.replaceWith(categoryEl);
+        else grid.appendChild(categoryEl);
       });
+    }
+
+    function getPillAffectedCategoryIndexes(pill) {
+      const affected = new Set();
+      statusPillConfig.categories.forEach((category, categoryIndex) => {
+        if ((category.pills || []).includes(pill)) affected.add(categoryIndex);
+        if ((category.pills || []).some(candidate =>
+          candidate && candidate.kind === 'aggregate' && (candidate.sources || []).includes(pill.id)
+        )) {
+          affected.add(categoryIndex);
+        }
+      });
+      return [...affected];
     }
 
     function closeConfigModal() {
       saveStatusPillConfig();
       const sourceModal = panel.querySelector('.bgd-source-config-modal');
-      if (sourceModal) sourceModal.remove();
-      modal.remove();
+      if (sourceModal) removeAccessibleModal(sourceModal);
+      removeAccessibleModal(modal);
       statusPillConfigModal = null;
       panel.classList.remove('bgd-config-open');
     }
 
+    activateModalAccessibility(modal, {
+      label: 'Status Pill Configuration',
+      onEscape: closeConfigModal,
+      initialFocus: modal.querySelector('#bgdStatusConfigX'),
+    });
+
     modal.querySelector('#bgdStatusConfigX').addEventListener('click', () => {
       closeConfigModal();
     });
-    modal.querySelector('#bgdStatusConfigDefault').addEventListener('click', () => {
+    const loadCountsBtn = modal.querySelector('#bgdStatusConfigLoadCounts');
+    if (loadCountsBtn) loadCountsBtn.addEventListener('click', async () => {
+      closeConfigModal();
+      const ownsContinuation = isHowLongToBeatHost();
+      if (!ownsContinuation) setBackloggdPreflightWait(true);
+      try {
+        await loadAllCounts();
+      } catch (error) {
+        addLog(error && error.message ? error.message : String(error), 'error');
+      } finally {
+        if (!ownsContinuation) {
+          setBackloggdPreflightWait(false);
+          if (panel && document.body.contains(panel)) renderStatusPillConfigModal();
+        }
+      }
+    });
+    modal.querySelector('#bgdStatusConfigDefault').addEventListener('click', async () => {
       const sourceModal = panel.querySelector('.bgd-source-config-modal');
-      if (sourceModal) sourceModal.remove();
-      const statusConfigDescriptor = getSourceStatusConfigDescriptorForHost();
-      const makeDefaultConfig = statusConfigDescriptor && statusConfigDescriptor.defaultConfigFromCollections
-        ? statusConfigDescriptor.defaultConfigFromCollections
-        : makeDefaultStatusPillConfig;
-      statusPillConfig = normalizeStatusPillConfig(makeDefaultConfig());
+      if (sourceModal) removeAccessibleModal(sourceModal);
+      try {
+        await resetStatusPillConfigToDefault();
+      } catch (error) {
+        addLog(`Could not restore default status pills: ${error && error.message ? error.message : String(error)}`, 'error');
+      }
       rerender();
     });
 
     rerender();
+
+    if (
+      activeSourceId === 'mobygames'
+      && statusConfigDescriptor
+      && typeof statusConfigDescriptor.discoverCollections === 'function'
+    ) {
+      Promise.resolve(statusConfigDescriptor.discoverCollections()).then(collections => {
+        if (statusPillConfigModal !== modal || !panel.contains(modal)) return;
+        if (typeof statusConfigDescriptor.syncDefaultCounts === 'function') {
+          statusConfigDescriptor.syncDefaultCounts(collections);
+        } else {
+          syncConfiguredCollectionCounts(collections);
+        }
+        rerender();
+      }).catch(error => {
+        addLog(`Could not refresh MobyGames status pill counts: ${error && error.message ? error.message : String(error)}`, 'error');
+      });
+    }
   }
 
   function openAggregateSourcesModal(aggregatePill, onDone) {
     const existing = panel.querySelector('.bgd-source-config-modal');
-    if (existing) existing.remove();
+    if (existing) removeAccessibleModal(existing);
     const statusPills = getAllStatusPillsFromConfig();
     const selected = new Set(aggregatePill.sources || []);
     const modal = document.createElement('div');
     modal.className = 'bgd-source-config-modal';
-    modal.innerHTML = `
-      <div class="bgd-status-config-head">
-        <div class="bgd-status-config-title">
-          <strong>Configure Sources</strong>
-          <span>${escapeHtml(aggregatePill.label || 'Aggregate Pill')}</span>
-        </div>
-        <button class="bgd-status-config-small" type="button" id="bgdSourceDone">Done</button>
-      </div>
-      <div class="bgd-source-list">
-        ${statusPills.map(pill => `
-          <label class="bgd-source-choice">
-            <input type="checkbox" value="${escapeHtml(pill.id)}" ${selected.has(pill.id) ? 'checked' : ''}>
-            <span style="width:10px;height:10px;border-radius:50%;background:${escapeHtml(pill.color || '#7dd3fc')};display:inline-block"></span>
-            <span>${escapeHtml(pill.label || 'Status Pill')}</span>
-          </label>
-        `).join('')}
-      </div>
-    `;
+    const head = document.createElement('div');
+    head.className = 'bgd-status-config-head';
+    const title = document.createElement('div');
+    title.className = 'bgd-status-config-title';
+    const strong = document.createElement('strong');
+    strong.textContent = 'Configure Sources';
+    const subtitle = document.createElement('span');
+    subtitle.textContent = aggregatePill.label || 'Aggregate Pill';
+    title.append(strong, subtitle);
+    const doneButton = document.createElement('button');
+    doneButton.className = 'bgd-status-config-small';
+    doneButton.type = 'button';
+    doneButton.textContent = 'Done';
+    head.append(title, doneButton);
+    const list = document.createElement('div');
+    list.className = 'bgd-source-list';
+    statusPills.forEach(pill => {
+      const choice = document.createElement('label');
+      choice.className = 'bgd-source-choice';
+      const input = document.createElement('input');
+      input.type = 'checkbox';
+      input.value = pill.id;
+      input.checked = selected.has(pill.id);
+      const color = document.createElement('span');
+      color.style.cssText = 'width:10px;height:10px;border-radius:50%;display:inline-block';
+      color.style.background = pill.color || '#7dd3fc';
+      const label = document.createElement('span');
+      label.textContent = pill.label || 'Status Pill';
+      choice.append(input, color, label);
+      list.appendChild(choice);
+    });
+    modal.append(head, list);
     panel.appendChild(modal);
     modal.querySelectorAll('input[type="checkbox"]').forEach(input => {
       input.addEventListener('change', () => {
@@ -5651,9 +8974,18 @@ ZX81`
         onDone();
       });
     });
-    modal.querySelector('#bgdSourceDone').addEventListener('click', () => {
-      modal.remove();
+    const close = () => {
+      removeAccessibleModal(modal);
       onDone();
+      requestAnimationFrame(() => {
+        if (statusPillConfigModal && document.contains(statusPillConfigModal)) statusPillConfigModal.focus();
+      });
+    };
+    doneButton.addEventListener('click', close);
+    activateModalAccessibility(modal, {
+      label: `Configure sources for ${aggregatePill.label || 'Aggregate Pill'}`,
+      onEscape: close,
+      initialFocus: doneButton,
     });
   }
 
@@ -5662,30 +8994,54 @@ ZX81`
     const discoverCollections = statusConfigDescriptor && statusConfigDescriptor.discoverCollections;
     if (!discoverCollections) return;
     const existing = panel.querySelector('.bgd-source-config-modal');
-    if (existing) existing.remove();
+    if (existing) removeAccessibleModal(existing);
     statusPill.collections = normalizeStatusPillCollections(statusPill.collections);
     const selected = new Set(statusPill.collections.map(collection => collection.url));
     const modal = document.createElement('div');
     modal.className = 'bgd-source-config-modal';
-    modal.innerHTML = `
-      <div class="bgd-status-config-head">
-        <div class="bgd-status-config-title">
-          <strong>Configure Collections</strong>
-          <span>${escapeHtml(statusPill.label || 'Status Pill')}</span>
-        </div>
-        <button class="bgd-status-config-small" type="button" id="bgdCollectionsDone">Done</button>
-      </div>
-      <div class="bgd-source-list"><div class="bgd-source-empty">Loading public collections...</div></div>
-      <div class="bgd-source-debug">Checking rendered collection table...</div>
-    `;
+    const head = document.createElement('div');
+    head.className = 'bgd-status-config-head';
+    const title = document.createElement('div');
+    title.className = 'bgd-status-config-title';
+    const strong = document.createElement('strong');
+    strong.textContent = 'Configure Collections';
+    const subtitle = document.createElement('span');
+    subtitle.textContent = statusPill.label || 'Status Pill';
+    title.append(strong, subtitle);
+    const doneButton = document.createElement('button');
+    doneButton.className = 'bgd-status-config-small';
+    doneButton.type = 'button';
+    doneButton.textContent = 'Done';
+    head.append(title, doneButton);
+    const list = document.createElement('div');
+    list.className = 'bgd-source-list';
+    const loading = document.createElement('div');
+    loading.className = 'bgd-source-empty';
+    loading.textContent = 'Loading sources...';
+    list.appendChild(loading);
+    modal.append(head, list);
+    if (!isBackloggdHost()) {
+      const debug = document.createElement('div');
+      debug.className = 'bgd-source-debug';
+      debug.textContent = 'Checking rendered collection table...';
+      modal.appendChild(debug);
+    }
     panel.appendChild(modal);
 
     function close() {
-      modal.remove();
+      removeAccessibleModal(modal);
       onDone();
+      requestAnimationFrame(() => {
+        if (statusPillConfigModal && document.contains(statusPillConfigModal)) statusPillConfigModal.focus();
+      });
     }
 
-    modal.querySelector('#bgdCollectionsDone').addEventListener('click', close);
+    doneButton.addEventListener('click', close);
+    activateModalAccessibility(modal, {
+      label: `Configure collections for ${statusPill.label || 'Status Pill'}`,
+      onEscape: close,
+      initialFocus: doneButton,
+    });
 
     function updateDebugLine() {
       const debugEl = modal.querySelector('.bgd-source-debug');
@@ -5699,25 +9055,48 @@ ZX81`
     function syncSelection(collections) {
       const checkedUrls = new Set([...modal.querySelectorAll('input[type="checkbox"]:checked')].map(input => input.value));
       statusPill.collections = collections.filter(collection => checkedUrls.has(collection.url));
+      if (isBackloggdHost() && statusPill.collections.length) {
+        const sourceId = statusPill.collections[0].url.replace(/^backloggd-source:/, '');
+        const source = STATUS_PILL_SOURCE_DEFS[sourceId];
+        if (source) statusPill.source = { type: source.type, value: source.value };
+      }
       saveStatusPillConfig();
       onDone();
     }
 
-    discoverCollections().then(collections => {
+    Promise.resolve(discoverCollections()).then(discoveredCollections => {
+      const collections = mergeLoadedSourceCollectionCounts(discoveredCollections);
       if (!panel.contains(modal)) return;
       const list = modal.querySelector('.bgd-source-list');
       updateDebugLine();
       if (!collections.length) {
-        list.innerHTML = '<div class="bgd-source-empty">No public collections found after checking the rendered public collection page.</div>';
+        list.replaceChildren();
+        const empty = document.createElement('div');
+        empty.className = 'bgd-source-empty';
+        empty.textContent = isIgdbHost()
+          ? 'No lists found after checking the rendered signed-in profile.'
+          : 'No public collections found after checking the rendered public collection page.';
+        list.appendChild(empty);
         return;
       }
-      list.innerHTML = collections.map(collection => `
-        <label class="bgd-source-choice">
-          <input type="checkbox" value="${escapeHtml(collection.url)}" ${selected.has(collection.url) ? 'checked' : ''}>
-          <span>${escapeHtml(collection.name)}</span>
-          <span class="bgd-source-count">${collection.games}</span>
-        </label>
-      `).join('');
+      list.replaceChildren();
+      collections.forEach(collection => {
+        const choice = document.createElement('label');
+        choice.className = 'bgd-source-choice';
+        const input = document.createElement('input');
+        input.type = 'checkbox';
+        input.value = collection.url;
+        input.checked = selected.has(collection.url);
+        const name = document.createElement('span');
+        const isIgdbListSource = isIgdbHost()
+          && /\/users\/[^/]+\/lists\/[^/?#]+/i.test(String(collection.url || ''));
+        name.textContent = `${collection.name}${isIgdbListSource ? ' (List)' : ''}`;
+        const count = document.createElement('span');
+        count.className = 'bgd-source-count';
+        count.textContent = String(collection.games);
+        choice.append(input, name, count);
+        list.appendChild(choice);
+      });
       list.querySelectorAll('input[type="checkbox"]').forEach(input => {
         input.addEventListener('change', () => syncSelection(collections));
       });
@@ -5731,7 +9110,11 @@ ZX81`
         failures: [error && error.message ? error.message : String(error)],
       };
       updateDebugLine();
-      list.innerHTML = `<div class="bgd-source-empty">Could not load public collections: ${escapeHtml(error && error.message ? error.message : String(error))}</div>`;
+      list.replaceChildren();
+      const empty = document.createElement('div');
+      empty.className = 'bgd-source-empty';
+      empty.textContent = `${isIgdbHost() ? 'Could not load IGDB lists' : 'Could not load public collections'}: ${error && error.message ? error.message : String(error)}`;
+      list.appendChild(empty);
     });
   }
 
@@ -5883,7 +9266,13 @@ ZX81`
     const headers = rows[0].map(h => String(h || '').replace(/^\uFEFF/, '').trim().toLowerCase());
     const headerSet = new Set(headers);
     const has = name => headerSet.has(name);
+    if (has('vn_id') || has('original_title') || has('length_votes') || has('rating_votes')) return 'vndb';
     if (has('category') || has('category_url') || has('category url')) return 'howlongtobeat';
+    if (has('platform_releases') || has('igdb_genres') || has('igdb_themes') || has('source_status')) return 'igdb';
+    if (has('product_id') || has('list_ids') || has('date_published')
+      || has('average_difficulty') || has('metacritic_score')) {
+      return 'gamefaqs';
+    }
     if (has('collection') || has('collection_url') || has('collection url')
       || has('gameplay') || has('mobygames gameplay')
       || has('release_year') || has('release year')
@@ -6018,7 +9407,7 @@ ZX81`
       const source = getConverterChoice('bgdConverterSource');
       const targets = getConverterTargets();
       if (!source || !targets.length) {
-        alert('Please choose at least one export file type.');
+        window.alert('Please choose at least one export file type.');
         return;
       }
       converterFileInput.accept = converterAcceptFor(source);
@@ -6034,7 +9423,7 @@ ZX81`
       const targets = getConverterTargets();
       const includeOfflineCovers = getConverterOfflineCoversChecked() && targets.includes('html');
       if (!targets.length) {
-        alert('Please choose at least one export file type.');
+        window.alert('Please choose at least one export file type.');
         return;
       }
 
@@ -6068,7 +9457,8 @@ ZX81`
           if (!exportStopMessageShown) showExportStoppedMessage();
         } else {
           console.error(error);
-          alert(error && error.message ? error.message : String(error));
+          const message = error && error.message ? error.message : String(error);
+          window.alert(message);
         }
       } finally {
         if (includeOfflineCovers) {
@@ -6089,6 +9479,58 @@ ZX81`
   function setProgressInRange(from, to, current, total) {
     if (!total || total < 1) return;
     setProgress(from + Math.round((current / total) * (to - from)));
+  }
+
+  let activeExportProgressPlan = null;
+
+  function makeBasicAdvancedProgressPlan(includeAdvanced) {
+    return includeAdvanced
+      ? { basic: [1, 20], advanced: [20, 95] }
+      : { basic: [1, 95], advanced: [95, 95] };
+  }
+
+  function makeBackloggdProgressPlan({ includeGenres, includePlatforms, includePlatforms226 }) {
+    if (includeGenres && includePlatforms226) {
+      return { basic: [1, 15], basicLibrary: [1, 15], basicRelease: [15, 15], genres: [15, 30], platforms: [30, 93], details: [93, 95] };
+    }
+    if (includeGenres && includePlatforms) {
+      return { basic: [1, 20], basicLibrary: [1, 20], basicRelease: [20, 20], genres: [20, 45], platforms: [45, 93], details: [93, 95] };
+    }
+    if (includeGenres) {
+      return { basic: [1, 25], basicLibrary: [1, 25], basicRelease: [25, 25], genres: [25, 93], platforms: [93, 93], details: [93, 95] };
+    }
+    if (includePlatforms226) {
+      return { basic: [1, 15], basicLibrary: [1, 15], basicRelease: [15, 15], genres: [15, 15], platforms: [15, 93], details: [93, 95] };
+    }
+    if (includePlatforms) {
+      return { basic: [1, 25], basicLibrary: [1, 25], basicRelease: [25, 25], genres: [25, 25], platforms: [25, 93], details: [93, 95] };
+    }
+    return { basic: [1, 93], basicLibrary: [1, 70], basicRelease: [70, 93], genres: [93, 93], platforms: [93, 93], details: [93, 95] };
+  }
+
+  function setActiveExportProgressPlan(plan) {
+    activeExportProgressPlan = plan;
+    return plan;
+  }
+
+  function getProgressStageRange(stage, fallbackFrom, fallbackTo) {
+    const range = activeExportProgressPlan && activeExportProgressPlan[stage];
+    return Array.isArray(range) && range.length === 2 ? range : [fallbackFrom, fallbackTo];
+  }
+
+  function setProgressAtStageStart(stage, fallbackFrom, fallbackTo) {
+    const [from] = getProgressStageRange(stage, fallbackFrom, fallbackTo);
+    setProgress(from);
+  }
+
+  function setProgressAtStageEnd(stage, fallbackFrom, fallbackTo) {
+    const [, to] = getProgressStageRange(stage, fallbackFrom, fallbackTo);
+    setProgress(to);
+  }
+
+  function setProgressInStage(stage, current, total, fallbackFrom, fallbackTo) {
+    const [from, to] = getProgressStageRange(stage, fallbackFrom, fallbackTo);
+    setProgressInRange(from, to, current, total);
   }
 
   function addLog(message, kind = 'info', updateId = null) {
@@ -6121,7 +9563,76 @@ ZX81`
     logUpdateLines = new Map();
   }
 
+  function getScrapeSelectionSummary() {
+    const sourceId = getSourceDescriptorForHost().id;
+    const summaries = {
+      mobygames: {
+        basic: 'title, status, release year, platform, rating, cover',
+        advanced: 'genres, gameplay, full dates, all platforms, average rating',
+      },
+      howlongtobeat: {
+        basic: 'title, status, platform, release year, rating, play length, cover',
+        advanced: 'full dates, genres, all platforms, community rating, full play lengths',
+      },
+      vndb: {
+        basic: 'title, status, rating, release date, languages, cover',
+        advanced: 'tags from each visual novel page',
+      },
+      gamefaqs: {
+        basic: 'title, list/status, platform, release year, cover',
+        advanced: 'genres, full dates, ratings, lengths, difficulty, developer and publisher',
+      },
+      igdb: {
+        basic: 'title, list/status, platforms, release dates, cover',
+        advanced: 'genres, themes, community rating and personal rating',
+      },
+    };
+    if (sourceId === 'backloggd') {
+      return getBackloggdTargetAdapter().id === 'lists'
+        ? {
+            basic: 'lists, game titles, URLs, covers and IDs',
+            advanced: 'ratings, genres, platforms, lengths and release dates',
+          }
+        : {
+            basic: 'titles, statuses, ratings, covers and release dates',
+            advanced: 'genres from game pages',
+          };
+    }
+    return summaries[sourceId] || {
+      basic: 'library games and status data',
+      advanced: 'extra metadata from game pages',
+    };
+  }
+
+  function renderScrapeSelectionSummary() {
+    if (!panel || !log) return;
+    const summary = getScrapeSelectionSummary();
+    const enabled = [];
+    if (chkGenres && chkGenres.checked) {
+      enabled.push(`${getSourceUiDescriptorForHost().metadataLabel || 'Advanced'}: ${summary.advanced}`);
+    }
+    if (isBackloggdHost() && chkPlatforms && chkPlatforms.checked) {
+      enabled.push('Platforms (50): faster platform scan');
+    }
+    if (isBackloggdHost() && chkPlatforms226 && chkPlatforms226.checked) {
+      enabled.push('Platforms (226): full platform scan');
+    }
+    if (chkOfflineCovers && chkOfflineCovers.checked) {
+      enabled.push('Offline Covers: embed downloaded cover images');
+    }
+    panel.classList.add('is-active');
+    addLog(`Basic: ${summary.basic}`, 'info', 'scrape-selection-basic');
+    [...logUpdateLines.keys()]
+      .filter(key => key.startsWith('scrape-selection-option-'))
+      .forEach(removeLog);
+    enabled.forEach((option, index) => {
+      addLog(option, 'info', `scrape-selection-option-${index}`);
+    });
+  }
+
   function beginExportSession({ formatSignature = getFileFormatSignature(), progress = 2 } = {}) {
+    activeExportProgressPlan = null;
+    downloadedFilenamesThisSession.clear();
     panel.classList.add('is-active');
     exportTargetSlug = userSlug;
     exportInProgress = true;
@@ -6136,10 +9647,12 @@ ZX81`
     updatePendingFileFormatNote();
     showRunControls();
     clearExportLog();
+    renderScrapeSelectionSummary();
     setProgress(progress);
   }
 
   function finishExportSession() {
+    activeExportProgressPlan = null;
     exportInProgress = false;
     exportTargetSlug = '';
     exportCancelRequested = false;
@@ -6162,6 +9675,27 @@ ZX81`
       exportBtn.textContent = 'Export';
     }
     hideRunControls();
+  }
+
+  async function runExportSession(operation, { shouldFinish = () => true, onError = null, onFinally = null } = {}) {
+    beginExportSession();
+    const exportStartedAt = Date.now();
+    try {
+      return await operation(exportStartedAt);
+    } catch (error) {
+      if (onError) onError(error);
+      if (isExportCancelledError(error)) {
+        if (!exportStopMessageShown) showExportStoppedMessage();
+      } else {
+        console.error(error);
+        addLog(error && error.message ? error.message : String(error), 'error');
+      }
+      setProgress(100);
+      return undefined;
+    } finally {
+      if (shouldFinish()) finishExportSession();
+      if (onFinally) onFinally();
+    }
   }
 
   function makeExportCancelledError() {
@@ -6257,6 +9791,18 @@ ZX81`
   function requestExportCancel() {
     if (!exportInProgress || exportCancelRequested) return;
     exportCancelRequested = true;
+    let returnUrl = '';
+    if (isMobyGamesHost()) {
+      const state = loadMobyGamesExportState();
+      returnUrl = state && state.startUrl || '';
+      storageSet(MOBYGAMES_EXPORT_CANCEL_KEY, '1');
+      clearMobyGamesExportState();
+    } else if (isHowLongToBeatHost()) {
+      const state = loadHowLongToBeatExportState();
+      returnUrl = state && state.startUrl || '';
+      storageSet(HLTB_EXPORT_CANCEL_KEY, '1');
+      clearHowLongToBeatExportState();
+    }
     if (exportPauseRequested && exportPausedStartedAt) {
       exportPausedTotalMs += Date.now() - exportPausedStartedAt;
       exportPausedStartedAt = 0;
@@ -6275,6 +9821,10 @@ ZX81`
       try { controller.abort(); } catch (_) {}
     });
     showExportStoppedMessage();
+    if (returnUrl && new URL(returnUrl, location.href).href !== location.href) {
+      savePendingNavMessage('Export stopped by user.');
+      location.href = returnUrl;
+    }
   }
 
   function getActiveExportElapsedMs(startTime) {
@@ -6339,19 +9889,50 @@ ZX81`
     return String(value).replace(/[\\/:*?"<>|]+/g, '-').replace(/\s+/g, '-').replace(/^-+|-+$/g, '') || 'backloggd-user';
   }
 
-  function storageGet(key, fallback = null) {
-    try {
-      const value = localStorage.getItem(key);
-      return value === null ? fallback : value;
-    } catch (_) {
-      return fallback;
-    }
+  function prepareExportStateForStorage(state) {
+    return {
+      ...state,
+      schemaVersion: EXPORT_STATE_SCHEMA_VERSION,
+      savedAt: Date.now(),
+    };
   }
 
-  function storageSet(key, value) {
+  function migrateStoredExportState(state) {
+    if (!state || typeof state !== 'object') return state;
+    if (state.schemaVersion == null && state.active && Array.isArray(state.mappings) && Array.isArray(state.items)) {
+      return {
+        ...state,
+        schemaVersion: EXPORT_STATE_SCHEMA_VERSION,
+        savedAt: Date.now(),
+      };
+    }
+    return state;
+  }
+
+  function validateStoredExportState(state, sourceId) {
+    if (!state || typeof state !== 'object' || !state.active) return null;
+    const schemaVersion = Number(state.schemaVersion || 0);
+    if (schemaVersion !== EXPORT_STATE_SCHEMA_VERSION) return null;
+    const savedAt = Number(state.savedAt || 0);
+    if (!Number.isFinite(savedAt) || savedAt <= 0 || Date.now() - savedAt > EXPORT_STATE_MAX_AGE_MS) return null;
+    if (!['scrape', 'finalize'].includes(state.phase)) return null;
+    if (!Array.isArray(state.mappings) || !Array.isArray(state.items)) return null;
+    if (sourceId === 'howlongtobeat' && !Number.isFinite(Number(state.currentPage || 1))) return null;
+    return state;
+  }
+
+  function saveExportState(key, state, sourceLabel) {
+    const storedState = prepareExportStateForStorage(state);
+    let serialized;
     try {
-      localStorage.setItem(key, value);
-    } catch (_) {}
+      serialized = JSON.stringify(storedState);
+    } catch (error) {
+      throw new Error(`${sourceLabel} export state could not be serialized: ${error && error.message ? error.message : String(error)}`);
+    }
+    if (!storageSet(key, serialized)) {
+      throw new Error(`${sourceLabel} export state could not be saved. Local storage may be full or unavailable; export navigation was stopped to avoid losing progress.`);
+    }
+    return storedState;
   }
 
   function savePendingNavMessage(message) {
@@ -6433,33 +10014,6 @@ ZX81`
       .filter(Boolean);
   }
 
-  const SHARED_EXPORT_PAYLOAD_FIELDS = [
-    'sourceWebsite',
-    'username',
-    'source',
-    'generated_at',
-    'counts',
-    'raw_counts',
-    'include_genres',
-    'include_platforms',
-    'include_platforms226',
-    'total',
-    'items',
-  ];
-
-  const SHARED_EXPORT_ITEM_FIELDS = [
-    'title',
-    'url',
-    'cover_url',
-    'status',
-    'statuses',
-    'release_date',
-    'genres',
-    'platforms',
-    'user_rating',
-    'average_rating',
-  ];
-
   function exportListFromValue(value) {
     if (Array.isArray(value)) return value.filter(Boolean);
     return splitExportList(value);
@@ -6485,6 +10039,8 @@ ZX81`
     item.status = primaryStatus;
     item.statuses = statuses.length ? statuses : [primaryStatus];
     item.release_date = item.release_date || item.fullReleaseDate || item.full_release_date || item.releaseYear || item.release_year || '';
+    item.languages = uniqueSortedLabels(exportListFromValue(item.languages || item.language));
+    item.length = String(item.length || '').trim();
     item.genres = exportListFromValue(item.genres);
     item.platforms = uniqueSortedLabels(exportListFromValue(item.platforms || (item.platform ? [item.platform] : [])));
     if (item.user_rating === undefined) item.user_rating = item.userRating == null ? null : item.userRating;
@@ -6493,6 +10049,10 @@ ZX81`
   }
 
   function normalizeSharedExportPayload(rawPayload, options = {}) {
+    const schemaVersion = Number(rawPayload.schema_version || EXPORT_PAYLOAD_SCHEMA_VERSION);
+    if (!Number.isInteger(schemaVersion) || schemaVersion < 1 || schemaVersion > EXPORT_PAYLOAD_SCHEMA_VERSION) {
+      throw new Error(`Unsupported export payload schema version: ${rawPayload.schema_version}`);
+    }
     const items = (rawPayload.items || []).map(item =>
       normalizeSharedExportItem(item, { defaultStatus: options.defaultStatus ?? 'played' })
     );
@@ -6502,6 +10062,7 @@ ZX81`
       : buildCountsFromItems(items);
     return {
       ...rawPayload,
+      schema_version: schemaVersion,
       sourceWebsite: rawPayload.sourceWebsite || options.sourceWebsite || getSourceWebsite(DEFAULT_SOURCE_ID),
       username,
       source: rawPayload.source || options.source || '',
@@ -6511,6 +10072,8 @@ ZX81`
       include_genres: rawPayload.include_genres !== undefined ? !!rawPayload.include_genres : items.some(item => item.genres.length),
       include_platforms: rawPayload.include_platforms !== undefined ? !!rawPayload.include_platforms : items.some(item => item.platforms.length),
       include_platforms226: !!rawPayload.include_platforms226,
+      include_languages: rawPayload.include_languages !== undefined ? !!rawPayload.include_languages : items.some(item => item.languages.length),
+      include_length: rawPayload.include_length !== undefined ? !!rawPayload.include_length : items.some(item => item.length),
       total: items.length,
       items,
     };
@@ -6524,25 +10087,37 @@ ZX81`
     const raw = storageGet(HLTB_EXPORT_STATE_KEY, '');
     if (!raw) return null;
     try {
-      const state = JSON.parse(raw);
-      return state && state.active ? state : null;
+      const parsedState = JSON.parse(raw);
+      const state = migrateStoredExportState(parsedState);
+      const validState = validateStoredExportState(state, 'howlongtobeat');
+      if (!validState) {
+        clearHowLongToBeatExportState();
+      } else if (state !== parsedState) {
+        saveHowLongToBeatExportState(validState);
+      }
+      return validState;
     } catch (_) {
+      clearHowLongToBeatExportState();
       return null;
     }
   }
 
   function saveHowLongToBeatExportState(state) {
+    if (storageGet(HLTB_EXPORT_CANCEL_KEY, '0') === '1') return;
     if (!state) return;
     state.paused = !!exportPauseRequested;
     state.pausedTotalMs = exportPausedTotalMs;
-    storageSet(HLTB_EXPORT_STATE_KEY, JSON.stringify(state));
+    Object.assign(state, saveExportState(HLTB_EXPORT_STATE_KEY, state, 'HowLongToBeat'));
   }
 
   function clearHowLongToBeatExportState() {
-    storageSet(HLTB_EXPORT_STATE_KEY, '');
+    storageRemove(HLTB_EXPORT_STATE_KEY);
   }
 
-  function getHowLongToBeatConfiguredCategoryMappings(config = statusPillConfig) {
+  function getHowLongToBeatConfiguredCategoryMappings(
+    config = statusPillConfig,
+    collectionsTarget = isHowLongToBeatCollectionsTarget()
+  ) {
     const mappings = [];
     (config.categories || []).forEach(category => {
       (category.pills || []).forEach(pill => {
@@ -6550,6 +10125,7 @@ ZX81`
         normalizeStatusPillCollections(pill.collections).forEach(collection => {
           const normalized = normalizeHowLongToBeatCategory(collection);
           if (!normalized) return;
+          if (isHowLongToBeatCollectionsTarget(normalized.url) !== collectionsTarget) return;
           mappings.push({
             statusId: pill.id,
             status: pill.label || 'Status Pill',
@@ -6576,6 +10152,12 @@ ZX81`
     'Wii U', 'Wii', 'SNES', 'NES', '3DO', 'Arcade', 'Browser', 'Mobile', 'Android',
     'iOS', 'Mac', 'Linux', 'PC'
   ];
+  const HLTB_PLATFORM_MATCHERS = [...HLTB_KNOWN_PLATFORMS]
+    .sort((a, b) => b.length - a.length)
+    .map(platform => ({
+      platform,
+      pattern: new RegExp(`(^|\\b|\\s)${escapeRegExp(platform)}(\\b|\\s|$)`, 'i'),
+    }));
 
   function canonicalHowLongToBeatPlatform(platform) {
     const map = {
@@ -6595,11 +10177,8 @@ ZX81`
   function detectHowLongToBeatKnownPlatform(text) {
     const source = String(text || '').trim().replace(/\s+/g, ' ');
     if (!source) return '';
-    const platforms = [...HLTB_KNOWN_PLATFORMS].sort((a, b) => b.length - a.length);
-    for (const platform of platforms) {
-      const escaped = escapeRegExp(platform);
-      const rx = new RegExp(`(^|\\b|\\s)${escaped}(\\b|\\s|$)`, 'i');
-      if (rx.test(source)) return canonicalHowLongToBeatPlatform(platform);
+    for (const { platform, pattern } of HLTB_PLATFORM_MATCHERS) {
+      if (pattern.test(source)) return canonicalHowLongToBeatPlatform(platform);
     }
     return '';
   }
@@ -6655,31 +10234,203 @@ ZX81`
     return detectHowLongToBeatKnownPlatform(rowText.replace(title, '')) || '';
   }
 
-  function parseHowLongToBeatGamesDocument(doc, pageUrl, mapping) {
-    const normalizeText = value => String(value || '').trim().replace(/\s+/g, ' ');
+  function parseHowLongToBeatUserRatingPercent(value) {
+    const text = String(value || '');
+    const matches = [...text.matchAll(/(?:^|[^\d])((?:10|20|30|40|50|60|70|80|90|100))\s*%(?!\d)/g)];
+    if (!matches.length) return null;
+    const percent = Number(matches[matches.length - 1][1]);
+    return Number.isFinite(percent) ? percent / 10 : null;
+  }
+
+  function parseHowLongToBeatAverageRatingPercent(value) {
+    const match = String(value || '').match(/(?:^|[^\d])(\d{1,3})\s*%(?!\d)/);
+    if (!match) return null;
+    const percent = Number(match[1]);
+    return Number.isFinite(percent) && percent >= 0 && percent <= 100
+      ? Math.round(percent) / 10
+      : null;
+  }
+
+  function parseHowLongToBeatUserRatingValue(value, { allowBarePercent = false } = {}) {
+    const percentRating = parseHowLongToBeatUserRatingPercent(value);
+    if (percentRating != null) return percentRating;
+    if (!allowBarePercent) return null;
+    const text = String(value || '').trim();
+    const match = text.match(/(?:^|[^\d])((?:10|20|30|40|50|60|70|80|90|100))(?!\d)/);
+    return match ? Number(match[1]) / 10 : null;
+  }
+
+  function extractHowLongToBeatUserRatingFromRow(row) {
+    if (!row) return null;
+    const ratingSelectors = [
+      '[class*="user_rating"]',
+      '[class*="user-rating"]',
+      '[class*="UserRating"]',
+      '[class*="rating"]',
+      '[class*="Rating"]',
+      '[aria-label*="rating" i]',
+      '[title*="rating" i]',
+      '[data-rating]',
+      '[style*="rating"]',
+      '[style*="%"]',
+      '[class*="table_cell"]',
+    ];
+    const candidates = [];
+    if (row.matches(ratingSelectors.join(','))) candidates.push(row);
+    ratingSelectors.forEach(selector => {
+      row.querySelectorAll(selector).forEach(element => {
+        if (!candidates.includes(element)) candidates.push(element);
+      });
+    });
+    for (const element of candidates) {
+      const isGenericTableCell = element.matches('[class*="table_cell"]')
+        && !element.matches('[class*="rating"], [class*="Rating"], [class*="user_rating"], [class*="user-rating"], [class*="UserRating"]');
+      if (isGenericTableCell && /^\s*NR\s*$/i.test(String(element.textContent || ''))) return null;
+      const sources = [
+        element.getAttribute('aria-label'),
+        element.getAttribute('title'),
+        element.getAttribute('data-rating'),
+        element.getAttribute('style'),
+        element.textContent,
+        ...[...element.attributes].map(attribute => attribute.value),
+      ];
+      for (const source of sources) {
+        const rating = parseHowLongToBeatUserRatingValue(source, { allowBarePercent: !isGenericTableCell });
+        if (rating != null) return rating;
+      }
+    }
+    return parseHowLongToBeatUserRatingValue(row.textContent);
+  }
+
+  function hasHowLongToBeatUserRatingCell(row) {
+    return [...row.querySelectorAll('[class*="table_cell"]')].some(cell => {
+      const text = String(cell.textContent || '').trim();
+      return /^NR$/i.test(text) || parseHowLongToBeatUserRatingPercent(text) != null;
+    });
+  }
+
+  async function ensureHowLongToBeatListBoxView({ collectionsTarget = isHowLongToBeatCollectionsTarget() } = {}) {
+    const viewSelect = document.querySelector('select[aria-label="View Options"]');
+    if (!viewSelect || viewSelect.value === 'blox') return false;
+    const bloxOption = [...viewSelect.options].find(option => option.value === 'blox');
+    if (!bloxOption) return false;
+    viewSelect.value = 'blox';
+    viewSelect.dispatchEvent(new Event('change', { bubbles: true }));
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < 10000) {
+      await new Promise(resolve => setTimeout(resolve, 100));
+      const currentSelect = document.querySelector('select[aria-label="View Options"]');
+      const coverSelector = collectionsTarget
+        ? 'table img[class*="box_art_image"], main img[class*="box_art_image"], table img[src*="/games/"], main img[src*="/games/"]'
+        : '#user_games img[class*="box_art_image"], #user_games img[src*="/games/"]';
+      if (currentSelect && currentSelect.value === 'blox'
+        && document.querySelector(coverSelector)) {
+        return true;
+      }
+    }
+    return true;
+  }
+
+  function extractHowLongToBeatCoverUrlFromRow(row, pageUrl) {
+    if (!row) return '';
+    const image = row.querySelector('img[class*="box_art_image"], img[src*="/games/"], img[srcset*="/games/"]');
+    if (!image) return '';
+    const srcset = String(image.getAttribute('srcset') || '');
+    const highestSrcsetUrl = srcset.split(',')
+      .map(candidate => candidate.trim().split(/\s+/)[0])
+      .filter(Boolean)
+      .pop();
+    const rawUrl = image.currentSrc || image.getAttribute('src') || highestSrcsetUrl || '';
+    if (!rawUrl) return '';
+    try {
+      const url = new URL(rawUrl, pageUrl || location.href);
+      url.search = '';
+      url.hash = '';
+      return url.href;
+    } catch (_) {
+      return rawUrl.split(/[?#]/)[0];
+    }
+  }
+
+  function formatHowLongToBeatSeconds(value) {
+    const seconds = Number(value);
+    if (!Number.isFinite(seconds) || seconds <= 0) return '';
+    const hours = seconds / 3600;
+    const rounded = Math.round(hours * 2) / 2;
+    return `${Number.isInteger(rounded) ? rounded : rounded.toFixed(1)} Hours`;
+  }
+
+  function parseHowLongToBeatCollectionGamesDocument(doc, pageUrl, mapping) {
+    const games = [];
     const failures = [];
     const seen = new Set();
-    const links = [...doc.querySelectorAll('a[href*="/game"]')];
-    const games = [];
-    links.forEach((link, index) => {
-      const href = link.getAttribute('href') || '';
-      if (!href || /\/game\/?$/i.test(href)) return;
+    const nextDataGames = getHowLongToBeatNextData(doc)?.props?.pageProps?.listData?.games;
+    if (Array.isArray(nextDataGames)) {
+      nextDataGames.forEach(entry => {
+        const gameId = String(entry && entry.game_id || '').trim();
+        const title = String(entry && entry.game_name || '').trim().replace(/\s+/g, ' ');
+        if (!gameId || !title || seen.has(gameId)) return;
+        seen.add(gameId);
+        const gameUrl = `https://howlongtobeat.com/game/${encodeURIComponent(gameId)}`;
+        const coverUrl = entry.game_image
+          ? `https://howlongtobeat.com/games/${String(entry.game_image).replace(/^\/+/, '')}`
+          : '';
+        const platforms = uniqueSortedLabels(String(entry.profile_platform || '').split(','));
+        const averageRating = Number(entry.review_score);
+        games.push({
+          name: title,
+          title,
+          platform: platforms[0] || '',
+          platforms,
+          category: mapping.collection.name,
+          status: mapping.status,
+          statusId: mapping.statusId,
+          status_id: mapping.statusId,
+          statusColor: mapping.statusColor,
+          statuses: [mapping.status],
+          statusIds: [mapping.statusId].filter(Boolean),
+          status_ids: [mapping.statusId].filter(Boolean),
+          category_url: mapping.collection.url,
+          collection: mapping.collection.name,
+          collection_url: mapping.collection.url,
+          gameUrl,
+          url: gameUrl,
+          coverUrl,
+          cover_url: coverUrl,
+          genres: [],
+          release_date: entry.release_world ? String(entry.release_world) : '',
+          length: formatHowLongToBeatSeconds(entry.comp_all || entry.comp_plus || entry.comp_main),
+          user_rating: null,
+          average_rating: Number.isFinite(averageRating) && averageRating > 0 ? averageRating / 10 : null,
+        });
+      });
+      if (games.length) {
+        return {
+          games,
+          debug: { rowCount: games.length, names: games.map(game => game.name), failures },
+        };
+      }
+    }
+    [...doc.querySelectorAll('a[href*="/game/"]')].forEach((link, index) => {
+      const href = String(link.getAttribute('href') || '').trim();
+      if (!href) return;
       const gameUrl = new URL(href, pageUrl || location.href).href;
-      const gamePath = new URL(gameUrl).pathname;
-      if (!/^\/game\/[^/?#]+\/?$/i.test(gamePath)) return;
-      if (seen.has(gameUrl)) return;
-      seen.add(gameUrl);
-      const row = link.closest('tr')
-        || link.closest('[class*="row"]')
-        || link.closest('[class*="list"]')
-        || link.closest('[class*="game"]')
-        || link.closest('li')
-        || link.parentElement;
-      const title = normalizeText(link.innerText || link.textContent || link.getAttribute('title'));
+      if (!/^\/game\/[^/?#]+\/?$/i.test(new URL(gameUrl).pathname) || seen.has(gameUrl)) return;
+      const title = String(link.textContent || link.getAttribute('title') || '').trim().replace(/\s+/g, ' ');
       if (!title) {
-        failures.push(`Game link ${index + 1}: missing title text.`);
+        failures.push(`Collection game link ${index + 1}: missing title text.`);
         return;
       }
+      const row = link.closest('tr') || findHowLongToBeatGameRow(link, title);
+      if (!row) return;
+      seen.add(gameUrl);
+      const cells = [...row.querySelectorAll('td')];
+      const cellTexts = cells.map(cell => String(cell.textContent || '').trim().replace(/\s+/g, ' '));
+      const length = cellTexts.find(text => /\b(?:hours?|hrs?|minutes?|mins?)\b/i.test(text)) || '';
+      const averageRating = cellTexts
+        .map(parseHowLongToBeatAverageRatingPercent)
+        .find(value => value != null) ?? null;
+      const coverUrl = extractHowLongToBeatCoverUrlFromRow(row, pageUrl);
       const platform = extractHowLongToBeatPlatformFromRow(link, row, title);
       games.push({
         name: title,
@@ -6699,10 +10450,93 @@ ZX81`
         collection_url: mapping.collection.url,
         gameUrl,
         url: gameUrl,
-        cover_url: '',
+        coverUrl,
+        cover_url: coverUrl,
         genres: [],
         release_date: '',
+        length,
         user_rating: null,
+        average_rating: averageRating,
+      });
+    });
+    return {
+      games,
+      debug: {
+        rowCount: games.length,
+        names: games.map(game => game.name),
+        failures,
+      },
+    };
+  }
+
+  function findHowLongToBeatGameRow(link, title) {
+    const boundary = link && link.closest('#user_games');
+    let fallback = null;
+    let node = link && link.parentElement;
+    while (node && node !== boundary) {
+      const gameUrls = new Set([...node.querySelectorAll('a[href*="/game/"]')]
+        .map(gameLink => gameLink.getAttribute('href'))
+        .filter(Boolean));
+      if (gameUrls.size > 1) break;
+      if (hasHowLongToBeatUserRatingCell(node)) return node;
+      if (!fallback && (
+        node.matches('tr, li, [class*="row"], [class*="list"], [class*="game"]')
+        || extractHowLongToBeatPlatformFromRow(link, node, title)
+      )) {
+        fallback = node;
+      }
+      if (extractHowLongToBeatUserRatingFromRow(node) != null) return node;
+      node = node.parentElement;
+    }
+    return fallback || link.parentElement;
+  }
+
+  function parseHowLongToBeatGamesDocument(doc, pageUrl, mapping) {
+    const normalizeText = value => String(value || '').trim().replace(/\s+/g, ' ');
+    const failures = [];
+    const seen = new Set();
+    const links = [...doc.querySelectorAll('a[href*="/game"]')];
+    const games = [];
+    links.forEach((link, index) => {
+      const href = link.getAttribute('href') || '';
+      if (!href || /\/game\/?$/i.test(href)) return;
+      const gameUrl = new URL(href, pageUrl || location.href).href;
+      const gamePath = new URL(gameUrl).pathname;
+      if (!/^\/game\/[^/?#]+\/?$/i.test(gamePath)) return;
+      if (seen.has(gameUrl)) return;
+      seen.add(gameUrl);
+      const title = normalizeText(link.innerText || link.textContent || link.getAttribute('title'));
+      if (!title) {
+        failures.push(`Game link ${index + 1}: missing title text.`);
+        return;
+      }
+      const row = findHowLongToBeatGameRow(link, title);
+      const platform = extractHowLongToBeatPlatformFromRow(link, row, title);
+      const userRating = extractHowLongToBeatUserRatingFromRow(row);
+      const coverUrl = extractHowLongToBeatCoverUrlFromRow(row, pageUrl);
+      games.push({
+        name: title,
+        title,
+        platform,
+        platforms: platform ? [platform] : [],
+        category: mapping.collection.name,
+        status: mapping.status,
+        statusId: mapping.statusId,
+        status_id: mapping.statusId,
+        statusColor: mapping.statusColor,
+        statuses: [mapping.status],
+        statusIds: [mapping.statusId].filter(Boolean),
+        status_ids: [mapping.statusId].filter(Boolean),
+        category_url: mapping.collection.url,
+        collection: mapping.collection.name,
+        collection_url: mapping.collection.url,
+        gameUrl,
+        url: gameUrl,
+        coverUrl,
+        cover_url: coverUrl,
+        genres: [],
+        release_date: '',
+        user_rating: userRating,
         average_rating: null,
       });
     });
@@ -6717,23 +10551,20 @@ ZX81`
     };
   }
 
-  async function waitForHowLongToBeatGameList(timeoutMs = 60000) {
+  async function waitForHowLongToBeatGameList(timeoutMs = 60000, { collectionsTarget = isHowLongToBeatCollectionsTarget() } = {}) {
     let started = Date.now();
     while (Date.now() - started < timeoutMs) {
       const pauseCheckStartedAt = Date.now();
       await waitIfExportPaused();
       started += Date.now() - pauseCheckStartedAt;
-      const container = document.querySelector('#user_games');
+      const container = collectionsTarget
+        ? document.querySelector('table, main')
+        : document.querySelector('#user_games');
       if (container && !container.querySelector('.loading_bar')) return true;
       if (container && container.querySelector('a[href*="/game"]')) return true;
       await new Promise(resolve => setTimeout(resolve, 250));
     }
     return false;
-  }
-
-  function getHowLongToBeatRowsSignature(mapping) {
-    const parsed = parseHowLongToBeatGamesDocument(document, location.href, mapping);
-    return (parsed.games || []).map(game => `${game.gameUrl}|${game.platform}`).join('||');
   }
 
   function getHowLongToBeatPageUrl(categoryUrl, page) {
@@ -6796,6 +10627,17 @@ ZX81`
       existing._statusEntries.push(...statusEntries);
       existing._categoryEntries.push(categoryEntry);
       existing.platforms = uniqueSortedLabels([...(existing.platforms || []), ...(item.platforms || []), item.platform]);
+      const candidateCoverUrl = item.cover_url || item.coverUrl || '';
+      if (!(existing.cover_url || existing.coverUrl) && candidateCoverUrl) {
+        existing.cover_url = candidateCoverUrl;
+        existing.coverUrl = candidateCoverUrl;
+      }
+      const existingUserRating = Number(existing.user_rating);
+      const candidateUserRating = Number(item.user_rating);
+      if (Number.isFinite(candidateUserRating)
+        && (!Number.isFinite(existingUserRating) || candidateUserRating > existingUserRating)) {
+        existing.user_rating = candidateUserRating;
+      }
     });
     return [...byGame.values()].map(item => {
       const statusEntries = mergeOrderedMobyGamesStatusEntries(item._statusEntries || [], statusOrder);
@@ -6901,6 +10743,787 @@ ZX81`
     return item;
   }
 
+  function getGameFaqsConfiguredListMappings(config = statusPillConfig) {
+    const mappings = [];
+    (config.categories || []).forEach(category => {
+      (category.pills || []).forEach(pill => {
+        if (!pill || pill.kind !== 'status') return;
+        normalizeStatusPillCollections(pill.collections).forEach(collection => {
+          const listIdMatch = String(collection.url || '').match(/^gamefaqs-list:(-\d+)$/);
+          const fixedList = listIdMatch && GAMEFAQS_LISTS.find(entry => entry.id === Number(listIdMatch[1]));
+          let customListId = null;
+          if (!fixedList) {
+            try {
+              const customUrl = new URL(collection.url, location.origin);
+              customListId = Number(customUrl.searchParams.get('list'));
+              if (customUrl.pathname.replace(/\/+$/, '') !== '/mygames/lists' || !Number.isFinite(customListId) || customListId < 0) return;
+            } catch (_) {
+              return;
+            }
+          }
+          mappings.push({
+            statusId: pill.id,
+            status: pill.label || 'Status Pill',
+            statusColor: pill.color || '#7dd3fc',
+            collection: fixedList
+              ? { ...collection, name: fixedList.name, url: fixedList.url }
+              : { ...collection, url: new URL(collection.url, location.origin).href },
+            listId: fixedList ? fixedList.id : customListId,
+            target: fixedList ? 'collection' : 'lists',
+          });
+        });
+      });
+    });
+    const byKey = new Map();
+    mappings.forEach(mapping => byKey.set(`${mapping.statusId}|${mapping.listId}`, mapping));
+    return [...byKey.values()];
+  }
+
+  function getGameFaqsAjaxListUrl(listId, page) {
+    const url = new URL('/ajax/mygames_get_custom_list', 'https://gamefaqs.gamespot.com');
+    url.searchParams.set('rate', '0');
+    url.searchParams.set('list', String(listId));
+    url.searchParams.set('page', String(page));
+    url.searchParams.set('plat', '0');
+    return url.href;
+  }
+
+  function getGameFaqsCustomListPageUrl(listUrl, page) {
+    const url = new URL(listUrl, 'https://gamefaqs.gamespot.com');
+    if (page > 0) url.searchParams.set('page', String(page));
+    else url.searchParams.delete('page');
+    return url.href;
+  }
+
+  function getGameFaqsPlatformFromGameUrl(gameUrl) {
+    let slug = '';
+    try {
+      slug = new URL(gameUrl, 'https://gamefaqs.gamespot.com').pathname.split('/').filter(Boolean)[0] || '';
+    } catch (_) {}
+    const labels = {
+      '3ds': '3DS',
+      android: 'AND',
+      arcade: 'ARC',
+      ds: 'DS',
+      dreamcast: 'DC',
+      gba: 'GBA',
+      gbc: 'GBC',
+      gamecube: 'GC',
+      iphone: 'IOS',
+      mac: 'MAC',
+      n64: 'N64',
+      nes: 'NES',
+      pc: 'PC',
+      ps: 'PS',
+      ps2: 'PS2',
+      ps3: 'PS3',
+      ps4: 'PS4',
+      ps5: 'PS5',
+      psp: 'PSP',
+      switch: 'NS',
+      'switch-2': 'NS2',
+      unixlinux: 'LNX',
+      vita: 'VITA',
+      wii: 'WII',
+      'wii-u': 'WIIU',
+      xbox360: 'X360',
+      xboxone: 'XONE',
+      'xbox-series-x': 'XBSX',
+    };
+    return labels[slug.toLowerCase()] || slug.toUpperCase();
+  }
+
+  function parseGameFaqsListMeta(value, gameUrl = '') {
+    const raw = String(value || '').trim().replace(/\s+/g, ' ');
+    const withoutReleaseCount = raw
+      .replace(/\s*(?:--|[—–])\s*[\d,]+\s+releases?\s*$/i, '')
+      .trim();
+    const yearMatch = withoutReleaseCount.match(/(?:^|\s|\()((?:19|20)\d{2})(?:\)|$)/);
+    const releaseYear = yearMatch ? Number(yearMatch[1]) : null;
+    let platform = withoutReleaseCount;
+    if (yearMatch) {
+      platform = withoutReleaseCount
+        .slice(0, yearMatch.index)
+        .replace(/[\s(]+$/, '')
+        .trim();
+    }
+    platform = platform
+      .replace(/\s*(?:--|[—–]).*$/, '')
+      .replace(/\s+\d+\s+releases?$/i, '')
+      .trim();
+    if (!platform || /\breleases?\b/i.test(platform)) {
+      platform = getGameFaqsPlatformFromGameUrl(gameUrl);
+    }
+    return {
+      platform,
+      releaseYear,
+      releaseDate: releaseYear ? String(releaseYear) : '',
+    };
+  }
+
+  function parseGameFaqsListDocument(doc, pageUrl, mapping) {
+    const rows = [...doc.querySelectorAll('div.pod.mg_list li.list_game, li.list_game')];
+    const games = rows.map(row => {
+      const productId = String(row.dataset.pid || '').trim();
+      const titleLink = row.querySelector('.content a.bold[href]');
+      if (!productId || !titleLink) return null;
+      const meta = String(row.querySelector('.content .meta')?.textContent || '').trim().replace(/\s+/g, ' ');
+      const gameUrl = new URL(titleLink.getAttribute('href'), pageUrl).href;
+      const parsedMeta = parseGameFaqsListMeta(meta, gameUrl);
+      const coverSrc = row.querySelector('.list_img img.imgboxart[src]')?.getAttribute('src') || '';
+      return {
+        product_id: productId,
+        game_id: productId,
+        title: String(titleLink.textContent || '').trim().replace(/\s+/g, ' '),
+        url: gameUrl,
+        gameUrl,
+        cover_url: coverSrc ? new URL(coverSrc, pageUrl).href : '',
+        platform: parsedMeta.platform,
+        platforms: parsedMeta.platform ? [parsedMeta.platform] : [],
+        release_year: parsedMeta.releaseYear,
+        release_date: parsedMeta.releaseDate,
+        list: mapping.collection.name,
+        lists: [mapping.collection.name],
+        list_id: mapping.listId,
+        list_ids: [mapping.listId],
+        status: mapping.status,
+        statuses: [mapping.status],
+        statusId: mapping.statusId,
+        status_id: mapping.statusId,
+        statusIds: [mapping.statusId],
+        status_ids: [mapping.statusId],
+        statusColor: mapping.statusColor,
+        genres: [],
+        languages: [],
+        length: '',
+        user_rating: null,
+        average_rating: null,
+      };
+    }).filter(Boolean);
+    const count = Number(String(doc.querySelector('#list_count')?.textContent || '').replace(/[^\d]/g, ''));
+    const pageText = String(doc.querySelector('ul.paginate')?.textContent || '').replace(/\s+/g, ' ');
+    const pageMatch = pageText.match(/Page\s+(\d+)\s+of\s+(\d+)/i);
+    return {
+      games,
+      count: Number.isFinite(count) ? count : null,
+      totalPages: pageMatch ? Number(pageMatch[2]) : null,
+      signature: games.map(game => game.product_id).join('|'),
+    };
+  }
+
+  function normalizeGameFaqsMergeTitle(title) {
+    return String(title || '')
+      .normalize('NFKC')
+      .trim()
+      .replace(/\s+/g, ' ')
+      .toLowerCase();
+  }
+
+  function getGameFaqsPlatformPriority(platform) {
+    const value = String(platform || '').trim().toLowerCase();
+    if (!value) return 0;
+    if (/\b(?:ps5|playstation\s*5|xbox\s*(?:series\s*)?[sx]|xbsx|xss|switch\s*2|ns2)\b/.test(value)) return 500;
+    if (/\b(?:ps4|ps3|ps2|ps1|psx|playstation|xbox|xbone|x360|switch|ns|wii|wiiu|gamecube|gc|n64|snes|nes|dreamcast|dc|saturn|genesis|mega\s*drive|master\s*system|3do|jaguar|neo\s*geo)\b/.test(value)) return 400;
+    if (/\b(?:3ds|2ds|ds|gba|gbc|game\s*boy|gb|vita|psp|game\s*gear|gg|lynx|wonder\s*swan)\b/.test(value)) return 350;
+    if (/\b(?:arcade|arc)\b/.test(value)) return 250;
+    if (/\b(?:pc|windows|win|dos|linux|mac)\b/.test(value)) return 100;
+    if (/\b(?:android|and|ios|iphone|ipad|mobile)\b/.test(value)) return 50;
+    return 200;
+  }
+
+  function shouldReplaceGameFaqsRepresentative(existing, candidate) {
+    const existingPriority = getGameFaqsPlatformPriority(existing.platform);
+    const candidatePriority = getGameFaqsPlatformPriority(candidate.platform);
+    if (candidatePriority !== existingPriority) return candidatePriority > existingPriority;
+    const existingHasCover = !!String(existing.cover_url || '').trim();
+    const candidateHasCover = !!String(candidate.cover_url || '').trim();
+    if (candidateHasCover !== existingHasCover) return candidateHasCover;
+    return compareNatural(
+      candidate.product_id || candidate.url,
+      existing.product_id || existing.url
+    ) < 0;
+  }
+
+  function parseGameFaqsJsonAttribute(element, attribute = 'content') {
+    if (!element) return null;
+    try {
+      return JSON.parse(element.getAttribute(attribute) || element.textContent || 'null');
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function findGameFaqsVideoGameJsonLd(doc) {
+    const queue = [];
+    for (const script of doc.querySelectorAll('script[type="application/ld+json"]')) {
+      const data = parseGameFaqsJsonAttribute(script, 'textContent');
+      if (data) queue.push(data);
+    }
+    while (queue.length) {
+      const entry = queue.shift();
+      if (Array.isArray(entry)) {
+        queue.push(...entry);
+        continue;
+      }
+      if (!entry || typeof entry !== 'object') continue;
+      const types = Array.isArray(entry['@type']) ? entry['@type'] : [entry['@type']];
+      if (types.some(type => String(type || '').toLowerCase() === 'videogame')) return entry;
+      if (entry['@graph']) queue.push(entry['@graph']);
+    }
+    return null;
+  }
+
+  function formatHowLongToBeatLength(seconds) {
+    const value = Number(seconds);
+    if (!Number.isFinite(value) || value <= 0) return '';
+    return `${Math.round((value / 3600) * 2) / 2} Hours`;
+  }
+
+  function extractHowLongToBeatGameLength(doc, game) {
+    const structured = formatHowLongToBeatLength(game && (game.comp_all || game.compAll));
+    if (structured) return structured;
+    for (const candidate of doc.querySelectorAll('main div, main li, main section, [class*="game_times"] div, [class*="GameTime"] div')) {
+      const text = String(candidate.textContent || '').trim().replace(/\s+/g, ' ');
+      const match = text.match(/HowLongToBeat\s*([0-9,.]+)\s*(Hours?|Mins?|Minutes?)/i);
+      if (!match) continue;
+      const value = Number(match[1].replace(/,/g, ''));
+      if (!Number.isFinite(value)) continue;
+      return /min/i.test(match[2]) ? `${Math.round((value / 60) * 10) / 10} Hours` : `${value} Hours`;
+    }
+    return '';
+  }
+
+  function normalizeGameFaqsPlatform(value) {
+    const label = String(value || '').trim().replace(/\s+/g, ' ');
+    const aliases = {
+      PS3: 'PlayStation 3',
+      PS4: 'PlayStation 4',
+      PS5: 'PlayStation 5',
+      X360: 'Xbox 360',
+      XONE: 'Xbox One',
+      XBSX: 'Xbox Series X',
+      NS: 'Nintendo Switch',
+      NS2: 'Nintendo Switch 2',
+      DC: 'Dreamcast',
+      MAC: 'Macintosh',
+      LNX: 'Linux',
+    };
+    return aliases[label.toUpperCase()] || label;
+  }
+
+  function findGameFaqsDetailValue(doc, wantedLabel) {
+    const wanted = String(wantedLabel || '').trim().toLowerCase();
+    for (const content of doc.querySelectorAll('.pod_gameinfo .content, .pod_gameinfo_left .content, .content')) {
+      const bold = content.querySelector(':scope > b, :scope > strong');
+      if (!bold) continue;
+      const label = String(bold.textContent || '').trim().replace(/:$/, '').toLowerCase();
+      if (label !== wanted) continue;
+      const clone = content.cloneNode(true);
+      const cloneLabel = clone.querySelector(':scope > b, :scope > strong');
+      if (cloneLabel) cloneLabel.remove();
+      return {
+        text: String(clone.textContent || '').trim().replace(/\s+/g, ' '),
+        links: [...content.querySelectorAll('a')].map(link => String(link.textContent || '').trim().replace(/\s+/g, ' ')).filter(Boolean),
+      };
+    }
+    return { text: '', links: [] };
+  }
+
+  function parseGameFaqsAverageBlock(doc, id, unitPattern) {
+    const averageElement = doc.querySelector(`#${id}`);
+    const title = String(averageElement && averageElement.parentElement && averageElement.parentElement.getAttribute('title') || '');
+    const match = title.match(new RegExp(`Average:\\s*(\\d+(?:\\.\\d+)?)\\s*${unitPattern}\\s+from\\s+([\\d,]+)\\s+users`, 'i'));
+    const hint = String(doc.querySelector(`#${id}_hint`)?.textContent || '').trim().replace(/\s+/g, ' ');
+    const fallbackCount = hint.match(/\(([\d,]+)(?:\s+ratings?)?\)/i);
+    return {
+      value: match ? Number(match[1]) : null,
+      count: match ? Number(match[2].replace(/,/g, '')) : fallbackCount ? Number(fallbackCount[1].replace(/,/g, '')) : null,
+      label: hint.replace(/\s*\([\d,]+(?:\s+ratings?)?\)\s*$/i, '').trim(),
+    };
+  }
+
+  function extractGameFaqsGamePageDetails(doc, pageUrl = location.href) {
+    const utagData = parseGameFaqsJsonAttribute(doc.querySelector('meta#utag-data')) || {};
+    const jsonLd = findGameFaqsVideoGameJsonLd(doc) || {};
+    const currentPlatform = utagData.productPlatform
+      || String(doc.querySelector('.platform-title .header_more')?.textContent || '').replace(/[▼▾]/g, '').trim();
+    const jsonLdPlatforms = Array.isArray(jsonLd.gamePlatform) ? jsonLd.gamePlatform : [jsonLd.gamePlatform];
+    const platforms = uniqueSortedLabels([
+      currentPlatform,
+      ...[...doc.querySelectorAll('#header_more_menu .also_name')].map(element => element.textContent),
+      ...jsonLdPlatforms,
+    ].map(normalizeGameFaqsPlatform));
+    const genreDetail = findGameFaqsDetailValue(doc, 'Genre');
+    const jsonLdGenres = Array.isArray(jsonLd.genre) ? jsonLd.genre : [jsonLd.genre];
+    const genres = uniqueSortedLabels([
+      ...String(utagData.productGenre || '').split('|'),
+      ...genreDetail.links,
+      ...jsonLdGenres,
+    ]);
+    const releaseDetail = findGameFaqsDetailValue(doc, 'Release');
+    const releaseLinkText = String(doc.querySelector('a[href$="/data"]')?.textContent || '').trim().replace(/\s+/g, ' ');
+    const releaseDate = releaseDetail.text
+      || formatIsoDateForDisplay(jsonLd.datePublished)
+      || findReleaseDate(releaseLinkText);
+    const userRating = parseGameFaqsAverageBlock(doc, 'gs_rate_avg', 'stars?');
+    const difficulty = parseGameFaqsAverageBlock(doc, 'gs_difficulty_avg', 'hearts?');
+    const length = parseGameFaqsAverageBlock(doc, 'gs_length_avg', 'hours?');
+    const developer = findGameFaqsDetailValue(doc, 'Developer');
+    const publisher = findGameFaqsDetailValue(doc, 'Publisher');
+    const metacriticScoreElement = doc.querySelector('.metacritic .score');
+    const metacriticTitle = String(metacriticScoreElement?.getAttribute('title') || '');
+    const metacriticCountMatch = metacriticTitle.match(/from\s+([\d,]+)\s+critics?/i);
+    const metacriticLink = doc.querySelector('.metacritic a[href*="metacritic.com"]');
+    const ageRatingElement = doc.querySelector('.esrb [class*="esrb_logo_"]');
+    const ageRatingClass = [...(ageRatingElement?.classList || [])].find(name => name.startsWith('esrb_logo_')) || '';
+    const title = String(doc.querySelector('h1.page-title')?.textContent || doc.title || '').trim().replace(/\s+/g, ' ');
+    return {
+      title,
+      platforms,
+      genres,
+      releaseDate,
+      datePublished: String(jsonLd.datePublished || ''),
+      averageUserRating: userRating.value,
+      userRatingCount: userRating.count,
+      averageLengthHours: length.value,
+      lengthRatingCount: length.count,
+      averageDifficulty: difficulty.value,
+      difficultyRatingCount: difficulty.count,
+      difficultyLabel: difficulty.label,
+      developer: developer.links[0] || developer.text,
+      publisher: publisher.links[0] || publisher.text,
+      description: String(doc.querySelector('.game_desc')?.textContent || jsonLd.description || '').trim().replace(/\s+/g, ' '),
+      ageRating: ageRatingClass.replace('esrb_logo_', '').toUpperCase(),
+      ageRatingDescription: String(ageRatingElement?.getAttribute('title') || ''),
+      metacriticScore: parseRating(metacriticScoreElement?.textContent),
+      metacriticReviewCount: metacriticCountMatch ? Number(metacriticCountMatch[1].replace(/,/g, '')) : null,
+      metacriticUrl: metacriticLink ? new URL(metacriticLink.getAttribute('href'), pageUrl).href : '',
+      sourceUrl: pageUrl,
+    };
+  }
+
+  function parseGameFaqsGamePage(html, pageUrl) {
+    const doc = new DOMParser().parseFromString(String(html || ''), 'text/html');
+    return extractGameFaqsGamePageDetails(doc, pageUrl);
+  }
+
+  async function enrichGameFaqsItemsFromGamePages(items) {
+    const list = Array.isArray(items) ? items : [];
+    const missed = [];
+    const failed = [];
+    if (!list.length) return { missed, failed };
+    setProgressAtStageStart('advanced', 20, 95);
+    addLog(`GameFAQs advanced metadata: checking ${list.length} game pages`);
+    let completed = 0;
+    const concurrency = loadRequestDelaySettings('gamefaqs').concurrency;
+    let next = 0;
+    const workers = Array.from({ length: Math.min(concurrency, list.length) }, async () => {
+      while (next < list.length) {
+        checkExportCancelled();
+        await waitIfExportPaused();
+        const item = list[next];
+        next += 1;
+        const itemUrl = item.url || item.gameUrl;
+        const itemName = item.title || item.name || itemUrl || 'Unknown game';
+        try {
+          await waitForRequestSlot('gamefaqs', GAMEFAQS_REQUEST_DELAY_MIN_MS, GAMEFAQS_REQUEST_DELAY_MAX_MS);
+          const html = await fetchHtml(itemUrl, { maxAttempts: 2, timeoutMs: 20000 });
+          const details = parseGameFaqsGamePage(html, itemUrl);
+          item.platforms = uniqueSortedLabels([...(item.platforms || []), ...(details.platforms || [])]);
+          item.genres = uniqueSortedLabels(details.genres || []);
+          item.release_date = details.releaseDate || item.release_date || '';
+          item.release_year = Number(String(item.release_date).match(/\d{4}/)?.[0]) || item.release_year || null;
+          item.length = details.averageLengthHours == null ? '' : `${details.averageLengthHours} Hours`;
+          item.average_rating = details.averageUserRating;
+          item.developer = details.developer;
+          item.publisher = details.publisher;
+          item.description = details.description;
+          item.date_published = details.datePublished;
+          item.user_rating_count = details.userRatingCount;
+          item.average_length_hours = details.averageLengthHours;
+          item.length_rating_count = details.lengthRatingCount;
+          item.average_difficulty = details.averageDifficulty;
+          item.difficulty_rating_count = details.difficultyRatingCount;
+          item.difficulty_label = details.difficultyLabel;
+          item.age_rating = details.ageRating;
+          item.age_rating_description = details.ageRatingDescription;
+          item.metacritic_score = details.metacriticScore;
+          item.metacritic_review_count = details.metacriticReviewCount;
+          item.metacritic_url = details.metacriticUrl;
+          ['genres', 'releaseDate', 'averageUserRating', 'averageLengthHours'].forEach(field => {
+            const value = field === 'releaseDate' ? details.releaseDate : details[field];
+            if (value == null || value === '' || (Array.isArray(value) && !value.length)) missed.push({ title: itemName, field });
+          });
+        } catch (error) {
+          if (isExportCancelledError(error)) throw error;
+          failed.push({ title: itemName, url: itemUrl, error: error && error.message ? error.message : String(error) });
+        } finally {
+          completed += 1;
+          addLog(`GameFAQs advanced metadata ${completed} of ${list.length}`, 'info', 'gamefaqs-advanced-progress');
+          setProgressInStage('advanced', completed, list.length, 20, 95);
+        }
+      }
+    });
+    const workerResults = await Promise.allSettled(workers);
+    const cancelledWorker = workerResults.find(result =>
+      result.status === 'rejected' && isExportCancelledError(result.reason)
+    );
+    if (cancelledWorker) throw cancelledWorker.reason;
+    const failedWorker = workerResults.find(result => result.status === 'rejected');
+    if (failedWorker) throw failedWorker.reason;
+    removeLog('gamefaqs-advanced-progress');
+    if (failed.length) addLog(`GameFAQs advanced metadata failed for ${failed.length} game page${failed.length === 1 ? '' : 's'}`, 'error');
+    return { missed, failed };
+  }
+
+  function mergeGameFaqsItemsForExport(items) {
+    const byIdentity = new Map();
+    (items || []).forEach(rawItem => {
+      const key = normalizeGameFaqsMergeTitle(rawItem.title || rawItem.name)
+        || String(rawItem.product_id || rawItem.url || '');
+      const existing = byIdentity.get(key);
+      if (!existing) {
+        byIdentity.set(key, {
+          ...rawItem,
+          statuses: [...(rawItem.statuses || [rawItem.status]).filter(Boolean)],
+          statusIds: [...(rawItem.statusIds || rawItem.status_ids || []).filter(Boolean)],
+          status_ids: [...(rawItem.statusIds || rawItem.status_ids || []).filter(Boolean)],
+          lists: [...(rawItem.lists || [rawItem.list]).filter(Boolean)],
+          list_ids: [...(rawItem.list_ids || [rawItem.list_id]).filter(value => value != null)],
+          platforms: uniqueSortedLabels(rawItem.platforms || (rawItem.platform ? [rawItem.platform] : [])),
+        });
+        return;
+      }
+      const replaceRepresentative = shouldReplaceGameFaqsRepresentative(existing, rawItem);
+      const representativeFields = [
+        'product_id', 'game_id', 'url', 'gameUrl', 'cover_url',
+        'platform', 'release_year', 'release_date',
+      ];
+      if (replaceRepresentative) {
+        representativeFields.forEach(field => {
+          existing[field] = rawItem[field];
+        });
+      }
+      existing.statuses = [...new Set([...existing.statuses, ...(rawItem.statuses || [rawItem.status]).filter(Boolean)])];
+      existing.statusIds = [...new Set([...existing.statusIds, ...(rawItem.statusIds || rawItem.status_ids || []).filter(Boolean)])];
+      existing.status_ids = existing.statusIds;
+      existing.lists = [...new Set([...existing.lists, ...(rawItem.lists || [rawItem.list]).filter(Boolean)])];
+      existing.list_ids = [...new Set([...existing.list_ids, ...(rawItem.list_ids || [rawItem.list_id]).filter(value => value != null)])];
+      existing.platforms = uniqueSortedLabels([
+        ...(existing.platforms || []),
+        existing.platform,
+        ...(rawItem.platforms || []),
+        rawItem.platform,
+      ]);
+      existing.status = existing.statuses[0] || '';
+      existing.statusId = existing.statusIds[0] || '';
+      existing.status_id = existing.statusId;
+      existing.list = existing.lists[0] || '';
+      existing.list_id = existing.list_ids[0] ?? null;
+    });
+    return [...byIdentity.values()];
+  }
+
+  function normalizeGameFaqsSharedExportItem(rawItem) {
+    const sourceMeta = rawItem && rawItem.source_meta && typeof rawItem.source_meta === 'object' ? rawItem.source_meta : {};
+    const item = normalizeSharedExportItem(rawItem, { defaultStatus: '' });
+    item.product_id = item.product_id || sourceMeta.product_id || item.game_id || '';
+    item.list = item.list || sourceMeta.list || '';
+    item.lists = exportListFromValue(item.lists || sourceMeta.lists || item.list);
+    item.list_id = item.list_id ?? sourceMeta.list_id ?? null;
+    item.list_ids = exportListFromValue(item.list_ids || sourceMeta.list_ids || item.list_id).map(Number);
+    item.release_year = item.release_year || sourceMeta.release_year || Number(String(item.release_date || '').match(/\d{4}/)?.[0]) || null;
+    item.statusIds = exportListFromValue(item.statusIds || item.status_ids || sourceMeta.status_ids);
+    item.status_ids = item.statusIds;
+    item.platforms = uniqueSortedLabels(item.platforms || (item.platform ? [item.platform] : []));
+    const advancedMeta = {
+      developer: item.developer || sourceMeta.developer || '',
+      publisher: item.publisher || sourceMeta.publisher || '',
+      description: item.description || sourceMeta.description || '',
+      date_published: item.date_published || sourceMeta.date_published || '',
+      user_rating_count: item.user_rating_count ?? sourceMeta.user_rating_count ?? null,
+      average_length_hours: item.average_length_hours ?? sourceMeta.average_length_hours ?? null,
+      length_rating_count: item.length_rating_count ?? sourceMeta.length_rating_count ?? null,
+      average_difficulty: item.average_difficulty ?? sourceMeta.average_difficulty ?? null,
+      difficulty_rating_count: item.difficulty_rating_count ?? sourceMeta.difficulty_rating_count ?? null,
+      difficulty_label: item.difficulty_label || sourceMeta.difficulty_label || '',
+      age_rating: item.age_rating || sourceMeta.age_rating || '',
+      age_rating_description: item.age_rating_description || sourceMeta.age_rating_description || '',
+      metacritic_score: item.metacritic_score ?? sourceMeta.metacritic_score ?? null,
+      metacritic_review_count: item.metacritic_review_count ?? sourceMeta.metacritic_review_count ?? null,
+      metacritic_url: item.metacritic_url || sourceMeta.metacritic_url || '',
+    };
+    item.source_meta = {
+      ...sourceMeta,
+      product_id: item.product_id,
+      list: item.list,
+      lists: item.lists,
+      list_id: item.list_id,
+      list_ids: item.list_ids,
+      release_year: item.release_year,
+      status_ids: item.statusIds,
+      status_color: item.statusColor || sourceMeta.status_color || '',
+      ...advancedMeta,
+    };
+    return item;
+  }
+
+  function buildGameFaqsPayload(items, username, config, mappings, target = getGameFaqsTarget(), includeEnhancedMetadata = false) {
+    const normalizedItems = mergeGameFaqsItemsForExport(items).map(normalizeGameFaqsSharedExportItem);
+    const collectionCounts = new Map();
+    normalizedItems.forEach(item => {
+      item.list_ids.forEach(listId => {
+        collectionCounts.set(listId, (collectionCounts.get(listId) || 0) + 1);
+      });
+    });
+    const source = target === 'lists'
+      ? 'https://gamefaqs.gamespot.com/mygames/lists'
+      : 'https://gamefaqs.gamespot.com/mygames/collection';
+    return normalizeSharedExportPayload({
+      sourceWebsite: getSourceWebsite('gamefaqs'),
+      username,
+      source,
+      generated_at: new Date().toISOString(),
+      status_pill_config: cloneStatusPillConfig(config),
+      collections: mappings.map(mapping => ({
+        name: mapping.collection.name,
+        games: collectionCounts.get(mapping.listId) || 0,
+        url: mapping.collection.url,
+        status: mapping.status,
+      })),
+      include_genres: !!includeEnhancedMetadata,
+      include_platforms: true,
+      gamefaqs_platform_labels: GAMEFAQS_PLATFORM_LABELS,
+      total: normalizedItems.length,
+      items: normalizedItems,
+    }, {
+      sourceWebsite: getSourceWebsite('gamefaqs'),
+      username,
+      source,
+      defaultStatus: '',
+    });
+  }
+
+  function getVndbDisplayName(doc = document) {
+    const link = doc.querySelector('article h2 span a[href^="/u"]');
+    return String(link && link.textContent || '').trim();
+  }
+
+  function getVndbStatusMappings(config = statusPillConfig) {
+    const mappings = new Map();
+    const keyForLabel = value => String(value || '')
+      .trim()
+      .toLowerCase()
+      .replace(/^stalled$/, 'stall')
+      .replace(/[-_]+/g, ' ')
+      .replace(/\s+/g, ' ');
+    (config.categories || []).forEach(category => {
+      (category.pills || []).forEach(pill => {
+        if (!pill || pill.kind !== 'status') return;
+        normalizeStatusPillCollections(pill.collections).forEach(collection => {
+          mappings.set(keyForLabel(collection.name), {
+            id: pill.id,
+            label: pill.label || 'Status Pill',
+            color: pill.color || '#7dd3fc',
+          });
+        });
+      });
+    });
+    return mappings;
+  }
+
+  function vndbTableValue(card, wantedLabel) {
+    const wanted = String(wantedLabel || '').toLowerCase();
+    for (const row of card.querySelectorAll('table tr')) {
+      const cells = row.querySelectorAll('td');
+      if (cells.length < 2) continue;
+      const label = String(cells[0].textContent || '').replace(/:$/, '').trim().toLowerCase();
+      if (label === wanted) return cells[1];
+    }
+    return null;
+  }
+
+  function parseVndbLength(cell) {
+    if (!cell) return { length: '', lengthVotes: null };
+    const clone = cell.cloneNode(true);
+    const small = clone.querySelector('small');
+    const votesMatch = String(small && small.textContent || '').match(/\((\d+)\)/);
+    clone.querySelectorAll('small').forEach(el => el.remove());
+    clone.querySelectorAll('.small').forEach(el => {
+      el.replaceWith(` ${String(el.textContent || '').trim()}`);
+    });
+    return {
+      length: String(clone.textContent || '').trim().replace(/\s+/g, ' '),
+      lengthVotes: votesMatch ? Number(votesMatch[1]) : null,
+    };
+  }
+
+  function extractVndbReleaseDate(titleLink, card) {
+    let node = titleLink && titleLink.nextSibling;
+    while (node) {
+      if (node.nodeType === Node.ELEMENT_NODE && node.tagName === 'TABLE') break;
+      const match = String(node.textContent || '').match(/\b\d{4}-\d{2}-\d{2}\b/);
+      if (match) return match[0];
+      node = node.nextSibling;
+    }
+
+    const metadataBlock = titleLink && titleLink.parentElement;
+    const htmlBeforeTable = String(metadataBlock && metadataBlock.innerHTML || card && card.innerHTML || '')
+      .split(/<table\b/i, 1)[0];
+    const fallback = htmlBeforeTable.match(/\b\d{4}-\d{2}-\d{2}\b/);
+    return fallback ? fallback[0] : '';
+  }
+
+  function parseVndbListDocument(doc, pageUrl, config = statusPillConfig) {
+    const mappings = getVndbStatusMappings(config);
+    const cards = [...doc.querySelectorAll('[id^="ulist_vid_v"]')];
+    const items = cards.map(card => {
+      const vnId = String(card.id || '').replace(/^ulist_vid_/, '');
+      const titleLink = [...card.querySelectorAll(`a[href="/${vnId}"]`)]
+        .find(link => String(link.textContent || '').trim())
+        || [...card.querySelectorAll('a[href^="/v"]')].find(link => String(link.textContent || '').trim());
+      if (!titleLink) return null;
+      const labelsCell = vndbTableValue(card, 'Labels');
+      const labels = String(labelsCell && labelsCell.textContent || '')
+        .split(',')
+        .map(value => value.trim())
+        .filter(value => value && value !== '-');
+      const sourceLabels = labels.length ? labels : ['No Label'];
+      const mapped = sourceLabels.map(label => mappings.get(
+        String(label || '').trim().toLowerCase().replace(/^stalled$/, 'stall').replace(/[-_]+/g, ' ').replace(/\s+/g, ' ')
+      )).filter(Boolean);
+      if (!mapped.length) return null;
+      const statuses = [...new Set(mapped.map(entry => entry.label))];
+      const statusIds = [...new Set(mapped.map(entry => entry.id))];
+      const lengthData = parseVndbLength(vndbTableValue(card, 'Length'));
+      const voteText = String(vndbTableValue(card, 'Vote')?.textContent || '').trim();
+      const ratingCell = vndbTableValue(card, 'Rating');
+      const ratingText = String(ratingCell && ratingCell.childNodes[0] && ratingCell.childNodes[0].textContent || ratingCell && ratingCell.textContent || '').trim();
+      const ratingVotesMatch = String(ratingCell && ratingCell.querySelector('small')?.textContent || '').match(/\((\d+)\)/);
+      const releaseDate = extractVndbReleaseDate(titleLink, card);
+      const url = new URL(titleLink.getAttribute('href'), pageUrl || location.href).href;
+      return {
+        vn_id: vnId,
+        game_id: vnId,
+        title: String(titleLink.textContent || '').trim(),
+        original_title: String(titleLink.getAttribute('title') || '').trim(),
+        url,
+        cover_url: card.querySelector('img[src]')?.src || '',
+        release_date: releaseDate,
+        platforms: uniqueSortedLabels([...card.querySelectorAll('abbr[class*="icon-plat-"][title]')].map(el => el.title)),
+        languages: uniqueSortedLabels([...card.querySelectorAll('abbr[class*="icon-lang-"][title]')].map(el => el.title)),
+        length: lengthData.length,
+        length_votes: lengthData.lengthVotes,
+        user_rating: voteText && voteText !== '-' ? Number(voteText) : null,
+        average_rating: normalizeAverageRatingValue(ratingText),
+        rating_votes: ratingVotesMatch ? Number(ratingVotesMatch[1]) : null,
+        labels,
+        status: statuses[0] || '',
+        statuses,
+        statusIds,
+        status_ids: statusIds,
+        statusColor: mapped[0] && mapped[0].color || '',
+        genres: [],
+      };
+    }).filter(Boolean);
+    return {
+      username: getVndbDisplayName(doc),
+      items,
+      cardCount: cards.length,
+      cardIds: cards.map(card => String(card.id || '').replace(/^ulist_vid_/, '')).filter(Boolean),
+    };
+  }
+
+  function extractVndbGenres(doc) {
+    const tagContainer = doc && doc.querySelector('#vntags');
+    if (!tagContainer) return [];
+    return [...tagContainer.children]
+      .filter(span => span.matches('span.tagspl0'))
+      .map(span => span.querySelector('a[href^="/g"]'))
+      .filter(Boolean)
+      .map(anchor => String(anchor.textContent || '').trim())
+      .filter(Boolean);
+  }
+
+  async function enrichVndbItemsWithGenres(items) {
+    const list = Array.isArray(items) ? items : [];
+    let completed = 0;
+    let failures = 0;
+    let taggedItems = 0;
+    let totalGenres = 0;
+    const concurrency = loadRequestDelaySettings('vndb').concurrency;
+    await mapWithConcurrency(list, concurrency, async item => {
+      checkExportCancelled();
+      try {
+        await waitForRequestSlot('vndb', VNDB_REQUEST_DELAY_MIN_MS, VNDB_REQUEST_DELAY_MAX_MS);
+        const html = await fetchHtml(item.url, { maxAttempts: 2, timeoutMs: 20000 });
+        const doc = new DOMParser().parseFromString(html, 'text/html');
+        item.genres = extractVndbGenres(doc);
+        if (item.genres.length) {
+          taggedItems += 1;
+          totalGenres += item.genres.length;
+        }
+      } catch (error) {
+        failures += 1;
+        item.genres = [];
+      } finally {
+        completed += 1;
+        addLog(`Loading VNDB tags: ${completed}/${list.length}`, 'info', 'vndb-genre-progress');
+        setProgressInStage('advanced', completed, list.length, 20, 95);
+      }
+    });
+    removeLog('vndb-genre-progress');
+    return { failures, taggedItems, totalGenres };
+  }
+
+  function normalizeVndbSharedExportItem(rawItem) {
+    const item = normalizeSharedExportItem(rawItem, { defaultStatus: '' });
+    const sourceMeta = rawItem && rawItem.source_meta && typeof rawItem.source_meta === 'object' ? rawItem.source_meta : {};
+    item.vn_id = item.vn_id || sourceMeta.vn_id || item.game_id || '';
+    item.original_title = item.original_title || sourceMeta.original_title || '';
+    item.length_votes = item.length_votes == null ? sourceMeta.length_votes : item.length_votes;
+    item.rating_votes = item.rating_votes == null ? sourceMeta.rating_votes : item.rating_votes;
+    item.labels = exportListFromValue(item.labels || sourceMeta.labels);
+    item.statusIds = exportListFromValue(item.statusIds || item.status_ids || sourceMeta.status_ids);
+    item.status_ids = item.statusIds;
+    item.source_meta = {
+      ...sourceMeta,
+      vn_id: item.vn_id,
+      original_title: item.original_title,
+      length_votes: item.length_votes,
+      rating_votes: item.rating_votes,
+      labels: item.labels,
+      status_ids: item.statusIds,
+    };
+    return item;
+  }
+
+  function buildVndbPayload(items, username, source, config, includeGenres = null) {
+    const normalizedItems = items
+      .map(normalizeVndbSharedExportItem)
+      .filter(item => item.statusIds.length && item.statuses.some(Boolean));
+    const genresEnabled = includeGenres == null
+      ? normalizedItems.some(item => item.genres.length)
+      : !!includeGenres;
+    return normalizeSharedExportPayload({
+      sourceWebsite: getSourceWebsite('vndb'),
+      username,
+      source,
+      generated_at: new Date().toISOString(),
+      status_pill_config: cloneStatusPillConfig(config),
+      include_genres: genresEnabled,
+      include_platforms: true,
+      include_languages: true,
+      include_length: true,
+      items: normalizedItems,
+    }, {
+      sourceWebsite: getSourceWebsite('vndb'),
+      username,
+      source,
+      defaultStatus: '',
+    });
+  }
+
   function buildHowLongToBeatPayloadFromState(state) {
     const items = mergeHowLongToBeatItemsForExport(state.items || [], state.config || null)
       .map(item => normalizeHowLongToBeatSharedExportItem(item));
@@ -6922,8 +11545,8 @@ ZX81`
       enhanced_metadata_failures: state.enhancedMetadataFailures || [],
       total: items.length,
       items: items.sort((a, b) =>
-        String(a.name || '').localeCompare(String(b.name || ''), undefined, { sensitivity: 'base', numeric: true }) ||
-        String(a.platform || '').localeCompare(String(b.platform || ''), undefined, { sensitivity: 'base', numeric: true })
+        compareNatural(a.name, b.name) ||
+        compareNatural(a.platform, b.platform)
       ),
     };
   }
@@ -6948,6 +11571,8 @@ ZX81`
       canonical[field] = getItemFieldValue(item, field);
     });
     canonical.genres = exportListFromValue(canonical.genres);
+    canonical.languages = uniqueSortedLabels(exportListFromValue(canonical.languages));
+    canonical.length = String(canonical.length || '').trim();
     canonical.platforms = uniqueSortedLabels(exportListFromValue(canonical.platforms));
     canonical.statuses = exportListFromValue(canonical.statuses || canonical.status);
     if (!canonical.status && canonical.statuses.length) canonical.status = canonical.statuses[0];
@@ -6968,12 +11593,13 @@ ZX81`
 
   function buildCanonicalSharedExportPayload(sourceId, rawPayload, options = {}) {
     const descriptor = getSourceDescriptorById(sourceId);
+    const viewerOptions = resolveExportedHtmlTemplateOptions(descriptor);
     const normalizeItem = options.normalizeItem || normalizeSharedExportItem;
     const defaultStatus = options.defaultStatus ?? 'played';
     const items = (rawPayload.items || []).map(item =>
       buildCanonicalSharedExportItem(descriptor.id, item, { normalizeItem, defaultStatus })
     );
-    return normalizeSharedExportPayload({
+    const canonicalPayload = normalizeSharedExportPayload({
       ...rawPayload,
       sourceWebsite: descriptor.sourceWebsite,
       items,
@@ -6982,6 +11608,14 @@ ZX81`
       sourceWebsite: descriptor.sourceWebsite,
       defaultStatus,
     });
+    const preserveListLength = rawPayload.extract_target === 'lists';
+    canonicalPayload.items.forEach(item => {
+      if (!viewerOptions.showLanguageColumn) delete item.languages;
+      if (!viewerOptions.showLengthColumn && !preserveListLength) delete item.length;
+    });
+    if (!viewerOptions.showLanguageColumn) delete canonicalPayload.include_languages;
+    if (!viewerOptions.showLengthColumn && !preserveListLength) delete canonicalPayload.include_length;
+    return canonicalPayload;
   }
 
   function buildSharedJson(payload, sourceId = DEFAULT_SOURCE_ID, options = {}) {
@@ -7054,8 +11688,39 @@ ZX81`
     });
   }
 
+  function buildCsvStatusPillConfigLine(payload) {
+    return payload && payload.status_pill_config
+      ? `# status_pill_config=${encodeURIComponent(JSON.stringify(payload.status_pill_config))}`
+      : '';
+  }
+
+  function appendCsvStatusPillConfig(lines, payload) {
+    const configLine = buildCsvStatusPillConfigLine(payload);
+    if (!configLine) return lines;
+    return [...lines, ...Array(10).fill(''), configLine];
+  }
+
+  function parseCsvStatusPillConfig(text) {
+    const match = String(text || '').match(/^\uFEFF?#\s*status_pill_config=(.+)$/mi);
+    if (!match) return null;
+    try {
+      return JSON.parse(decodeURIComponent(match[1].trim()));
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function parseCsvDataRows(text) {
+    return parseCsvRows(text).filter(row => {
+      const firstCell = String(row[0] || '').replace(/^\uFEFF/, '').trim();
+      if (firstCell.startsWith('#')) return false;
+      return row.some(cell => String(cell || '').trim() !== '');
+    });
+  }
+
   function parseCsvExportPayload(text, filename = '') {
-    const rows = parseCsvRows(text);
+    const csvStatusPillConfig = parseCsvStatusPillConfig(text);
+    const rows = parseCsvDataRows(text);
     if (rows.length < 2) throw new Error('The CSV file is empty or missing rows.');
     const headers = rows[0].map(h => String(h || '').replace(/^\uFEFF/, '').trim().toLowerCase());
     const headerIndex = new Map(headers.map((header, index) => [header, index]));
@@ -7066,10 +11731,12 @@ ZX81`
     };
     const includeGenres = headerIndex.has('genres');
     const includePlatforms = headerIndex.has('platforms');
+    const includeLanguages = headerIndex.has('languages');
     const items = rows.slice(1).map(row => {
       const statusInfo = normalizeLibraryStatus(cell(row, 'status'));
       const item = {
         release_date: cell(row, 'release_date'),
+        length: cell(row, 'length'),
         title: cell(row, 'title'),
         status: statusInfo.status,
         statuses: [statusInfo.status],
@@ -7082,6 +11749,7 @@ ZX81`
       };
       if (includeGenres) item.genres = splitExportList(cell(row, 'genres'));
       if (includePlatforms) item.platforms = splitExportList(cell(row, 'platforms'));
+      if (includeLanguages) item.languages = splitExportList(cell(row, 'languages'));
       return item;
     }).filter(item => item.title || item.url || item.game_id);
     return normalizeExportPayload({
@@ -7091,6 +11759,7 @@ ZX81`
       include_genres: includeGenres,
       include_platforms: includePlatforms,
       include_platforms226: false,
+      status_pill_config: csvStatusPillConfig,
       items,
     }, filename);
   }
@@ -7126,7 +11795,8 @@ ZX81`
   }
 
   function parseMobyGamesCsvExportPayload(text, filename = '') {
-    const rows = parseCsvRows(text).filter(row => String(row[0] || '').trim()[0] !== '#');
+    const csvStatusPillConfig = parseCsvStatusPillConfig(text);
+    const rows = parseCsvDataRows(text);
     if (rows.length < 2) throw new Error('The CSV file is empty or missing rows.');
     const headers = rows[0].map(h => String(h || '').replace(/^\uFEFF/, '').trim().toLowerCase());
     const headerIndex = new Map(headers.map((header, index) => [header, index]));
@@ -7152,6 +11822,8 @@ ZX81`
       return {
         title: cell(row, 'title') || cell(row, 'name'),
         release_date: cell(row, 'release_date') || cell(row, 'release date'),
+        length: cell(row, 'length'),
+        languages: splitExportList(cell(row, 'languages') || cell(row, 'language')),
         release_year: releaseYear,
         platform: cell(row, 'platform'),
         platforms: splitExportList(cell(row, 'platforms') || cell(row, 'mobygames platforms') || cell(row, 'platform')),
@@ -7173,6 +11845,7 @@ ZX81`
       username: guessMobyGamesUsernameFromFilename(filename) || userSlug,
       source: getMobyGamesCollectionRootUrl(location.href) || location.href,
       generated_at: new Date().toISOString(),
+      status_pill_config: csvStatusPillConfig,
       items,
     }, filename);
   }
@@ -7223,7 +11896,8 @@ ZX81`
   }
 
   function parseHowLongToBeatCsvExportPayload(text, filename = '') {
-    const rows = parseCsvRows(text).filter(row => String(row[0] || '').trim()[0] !== '#');
+    const csvStatusPillConfig = parseCsvStatusPillConfig(text);
+    const rows = parseCsvDataRows(text);
     if (rows.length < 2) throw new Error('The CSV file is empty or missing rows.');
     const headers = rows[0].map(h => String(h || '').replace(/^\uFEFF/, '').trim().toLowerCase());
     const headerIndex = new Map(headers.map((header, index) => [header, index]));
@@ -7246,6 +11920,8 @@ ZX81`
       return {
         title: cell(row, 'title'),
         release_date: cell(row, 'release_date') || cell(row, 'release date'),
+        length: cell(row, 'length'),
+        languages: splitExportList(cell(row, 'languages') || cell(row, 'language')),
         genres: splitExportList(cell(row, 'genres') || cell(row, 'genre')),
         platform: cell(row, 'platform'),
         platforms: splitExportList(cell(row, 'platforms') || cell(row, 'platform')),
@@ -7267,6 +11943,7 @@ ZX81`
       username: guessHowLongToBeatUsernameFromFilename(filename) || userSlug,
       source: getHowLongToBeatUserGamesRootUrl(location.href) || location.href,
       generated_at: new Date().toISOString(),
+      status_pill_config: csvStatusPillConfig,
       items,
     }, filename);
   }
@@ -7282,6 +11959,255 @@ ZX81`
     const match = String(text || '').match(/<script[^>]+id=["']payload["'][^>]*>([\s\S]*?)<\/script>/i);
     if (match) return parseHowLongToBeatJsonExportPayload(match[1], filename);
     throw new Error('The HTML file does not contain a HowLongToBeat export payload.');
+  }
+
+  function normalizeGameFaqsExportPayload(rawPayload, filename = '') {
+    if (!rawPayload || typeof rawPayload !== 'object' || !Array.isArray(rawPayload.items)) {
+      throw new Error('This file does not contain a GameFAQs export payload.');
+    }
+    if (rawPayload.sourceWebsite && !isSourceWebsite(rawPayload.sourceWebsite, 'gamefaqs')) {
+      const sourceName = sourceLabelForWebsite(rawPayload.sourceWebsite);
+      throw new Error(`This is a ${sourceName} export file. Use the File Converter on the ${sourceName} export screen.`);
+    }
+    const username = rawPayload.username || guessUsernameFromFilenameForSource('gamefaqs', filename) || userSlug || 'gamefaqs-user';
+    const items = rawPayload.items.map(normalizeGameFaqsSharedExportItem).filter(item => item.title || item.url);
+    if (!items.length) throw new Error('The GameFAQs export does not contain any games.');
+    return normalizeSharedExportPayload({
+      ...rawPayload,
+      sourceWebsite: getSourceWebsite('gamefaqs'),
+      username,
+      source: rawPayload.source || 'https://gamefaqs.gamespot.com/mygames/collection',
+      generated_at: rawPayload.generated_at || new Date().toISOString(),
+      status_pill_config: rawPayload.status_pill_config || makeDefaultGameFaqsStatusPillConfig(),
+      collections: Array.isArray(rawPayload.collections) ? rawPayload.collections : [],
+      include_genres: rawPayload.include_genres !== undefined
+        ? !!rawPayload.include_genres
+        : items.some(item => Array.isArray(item.genres) && item.genres.length),
+      include_platforms: true,
+      total: items.length,
+      items,
+    }, {
+      sourceWebsite: getSourceWebsite('gamefaqs'),
+      username,
+      defaultStatus: '',
+    });
+  }
+
+  function parseGameFaqsCsvExportPayload(text, filename = '') {
+    const csvStatusPillConfig = parseCsvStatusPillConfig(text);
+    const rows = parseCsvDataRows(text);
+    if (rows.length < 2) throw new Error('The CSV file is empty or missing rows.');
+    const headers = rows[0].map(value => String(value || '').trim().toLowerCase());
+    const index = new Map(headers.map((header, i) => [header, i]));
+    if (!index.has('title') || !index.has('url')) throw new Error('The CSV file does not look like a GameFAQs export.');
+    const cell = (row, name) => index.has(name) ? String(row[index.get(name)] || '').trim() : '';
+    const items = rows.slice(1).map(row => ({
+      release_date: cell(row, 'release_date'),
+      release_year: Number(cell(row, 'release_year')) || null,
+      title: cell(row, 'title'),
+      status: splitExportList(cell(row, 'status'))[0] || '',
+      statuses: splitExportList(cell(row, 'status')),
+      status_ids: splitExportList(cell(row, 'status_ids')),
+      platforms: splitExportList(cell(row, 'platforms')),
+      genres: splitExportList(cell(row, 'genres')),
+      length: cell(row, 'length'),
+      average_rating: parseRating(cell(row, 'average_rating')),
+      product_id: cell(row, 'product_id'),
+      url: cell(row, 'url'),
+      cover_url: cell(row, 'cover_url'),
+      list: splitExportList(cell(row, 'lists'))[0] || '',
+      lists: splitExportList(cell(row, 'lists')),
+      list_ids: splitExportList(cell(row, 'list_ids')).map(Number),
+      developer: cell(row, 'developer'),
+      publisher: cell(row, 'publisher'),
+      description: cell(row, 'description'),
+      date_published: cell(row, 'date_published'),
+      user_rating_count: parseRating(cell(row, 'user_rating_count')),
+      average_length_hours: parseRating(cell(row, 'average_length_hours')),
+      length_rating_count: parseRating(cell(row, 'length_rating_count')),
+      average_difficulty: parseRating(cell(row, 'average_difficulty')),
+      difficulty_rating_count: parseRating(cell(row, 'difficulty_rating_count')),
+      difficulty_label: cell(row, 'difficulty_label'),
+      age_rating: cell(row, 'age_rating'),
+      age_rating_description: cell(row, 'age_rating_description'),
+      metacritic_score: parseRating(cell(row, 'metacritic_score')),
+      metacritic_review_count: parseRating(cell(row, 'metacritic_review_count')),
+      metacritic_url: cell(row, 'metacritic_url'),
+    }));
+    return normalizeGameFaqsExportPayload({
+      username: guessUsernameFromFilenameForSource('gamefaqs', filename),
+      include_genres: index.has('genres'),
+      status_pill_config: csvStatusPillConfig,
+      items,
+    }, filename);
+  }
+
+  function parseGameFaqsJsonExportPayload(text, filename = '') {
+    return normalizeGameFaqsExportPayload(JSON.parse(text), filename);
+  }
+
+  function parseGameFaqsHtmlExportPayload(text, filename = '') {
+    const doc = new DOMParser().parseFromString(text, 'text/html');
+    const payloadEl = doc.getElementById('payload');
+    if (payloadEl && payloadEl.textContent) return parseGameFaqsJsonExportPayload(payloadEl.textContent, filename);
+    throw new Error('The HTML file does not contain a GameFAQs export payload.');
+  }
+
+  function normalizeIgdbExportPayload(rawPayload, filename = '') {
+    if (!rawPayload || typeof rawPayload !== 'object' || !Array.isArray(rawPayload.items)) {
+      throw new Error('This file does not contain an IGDB export payload.');
+    }
+    if (rawPayload.sourceWebsite && !isSourceWebsite(rawPayload.sourceWebsite, 'igdb')) {
+      const sourceName = sourceLabelForWebsite(rawPayload.sourceWebsite);
+      throw new Error(`This is a ${sourceName} export file. Use the File Converter on the ${sourceName} export screen.`);
+    }
+    const username = rawPayload.username || guessUsernameFromFilenameForSource('igdb', filename) || userSlug || 'igdb-user';
+    const items = rawPayload.items.map(normalizeIgdbSharedExportItem).filter(item => item.title || item.url);
+    if (!items.length) throw new Error('The IGDB export does not contain any games.');
+    return normalizeSharedExportPayload({
+      ...rawPayload,
+      sourceWebsite: getSourceWebsite('igdb'),
+      username,
+      source: rawPayload.source || `https://www.igdb.com/users/${encodeURIComponent(username)}`,
+      generated_at: rawPayload.generated_at || new Date().toISOString(),
+      status_pill_config: rawPayload.status_pill_config || makeDefaultIgdbStatusPillConfig(),
+      collections: Array.isArray(rawPayload.collections) ? rawPayload.collections : [],
+      include_genres: items.some(item => item.genres.length),
+      include_platforms: items.some(item => item.platforms.length),
+      igdb_genre_labels: IGDB_GENRE_LABELS,
+      igdb_platform_labels: IGDB_PLATFORM_LABELS,
+      total: items.length,
+      items,
+    }, {
+      sourceWebsite: getSourceWebsite('igdb'),
+      username,
+      defaultStatus: '',
+    });
+  }
+
+  function parseIgdbCsvExportPayload(text, filename = '') {
+    const csvStatusPillConfig = parseCsvStatusPillConfig(text);
+    const rows = parseCsvDataRows(text);
+    if (rows.length < 2) throw new Error('The CSV file is empty or missing rows.');
+    const headers = rows[0].map(value => String(value || '').replace(/^\uFEFF/, '').trim().toLowerCase());
+    const index = new Map(headers.map((header, i) => [header, i]));
+    if (!index.has('title') || !index.has('url')) throw new Error('The CSV file does not look like an IGDB export.');
+    const cell = (row, name) => index.has(name) ? String(row[index.get(name)] || '').trim() : '';
+    const parsePlatformReleases = value => {
+      try {
+        const parsed = JSON.parse(value || '[]');
+        return Array.isArray(parsed) ? parsed : [];
+      } catch (_) {
+        return [];
+      }
+    };
+    const items = rows.slice(1).map(row => ({
+      release_date: cell(row, 'release_date'),
+      release_year: Number(cell(row, 'release_year')) || null,
+      title: cell(row, 'title'),
+      status: splitExportList(cell(row, 'status'))[0] || '',
+      statuses: splitExportList(cell(row, 'status')),
+      status_ids: splitExportList(cell(row, 'status_ids')),
+      platforms: splitExportList(cell(row, 'platforms')),
+      genres: splitExportList(cell(row, 'genres')),
+      average_rating: parseRating(cell(row, 'average_rating')),
+      user_rating: parseRating(cell(row, 'user_rating')),
+      rating_count_label: cell(row, 'rating_count_label'),
+      igdb_genres: splitExportList(cell(row, 'igdb_genres')),
+      igdb_themes: splitExportList(cell(row, 'igdb_themes')),
+      platform_releases: parsePlatformReleases(cell(row, 'platform_releases')),
+      game_id: cell(row, 'game_id'),
+      url: cell(row, 'url'),
+      cover_url: cell(row, 'cover_url'),
+      list: cell(row, 'list'),
+      list_slug: cell(row, 'list_slug'),
+      source_status: cell(row, 'source_status'),
+    }));
+    return normalizeIgdbExportPayload({
+      username: guessUsernameFromFilenameForSource('igdb', filename),
+      status_pill_config: csvStatusPillConfig,
+      items,
+    }, filename);
+  }
+
+  function parseIgdbJsonExportPayload(text, filename = '') {
+    return normalizeIgdbExportPayload(JSON.parse(text), filename);
+  }
+
+  function parseIgdbHtmlExportPayload(text, filename = '') {
+    const doc = new DOMParser().parseFromString(text, 'text/html');
+    const payloadEl = doc.getElementById('payload');
+    if (payloadEl && payloadEl.textContent) return parseIgdbJsonExportPayload(payloadEl.textContent, filename);
+    throw new Error('The HTML file does not contain an IGDB export payload.');
+  }
+
+  function normalizeVndbExportPayload(rawPayload, filename = '') {
+    if (!rawPayload || typeof rawPayload !== 'object' || !Array.isArray(rawPayload.items)) {
+      throw new Error('This file does not contain a VNDB export payload.');
+    }
+    const username = rawPayload.username || guessUsernameFromFilenameForSource('vndb', filename) || userSlug || 'vndb-user';
+    const items = rawPayload.items.map(item => ({
+      ...item,
+      genres: item.genres || item.tags || [],
+    }));
+    return buildVndbPayload(
+      items,
+      username,
+      rawPayload.source || location.href,
+      rawPayload.status_pill_config || makeDefaultVndbStatusPillConfig(),
+      rawPayload.include_genres !== undefined ? rawPayload.include_genres : rawPayload.include_tags
+    );
+  }
+
+  function parseVndbCsvExportPayload(text, filename = '') {
+    const csvStatusPillConfig = parseCsvStatusPillConfig(text);
+    const rows = parseCsvDataRows(text);
+    if (rows.length < 2) throw new Error('The CSV file is empty or missing rows.');
+    const headers = rows[0].map(value => String(value || '').trim().toLowerCase());
+    const index = new Map(headers.map((header, i) => [header, i]));
+    const cell = (row, name) => index.has(name) ? String(row[index.get(name)] || '').trim() : '';
+    const items = rows.slice(1).map(row => {
+      const statuses = splitExportList(cell(row, 'status'));
+      const statusIds = splitExportList(cell(row, 'status_ids'));
+      return {
+        release_date: cell(row, 'release_date'),
+        title: cell(row, 'title'),
+        status: statuses[0] || '',
+        statuses,
+        length: cell(row, 'length'),
+        average_rating: parseRating(cell(row, 'average_rating')),
+        user_rating: parseRating(cell(row, 'user_rating')),
+        languages: splitExportList(cell(row, 'languages')),
+        genres: splitExportList(cell(row, 'tags') || cell(row, 'genres')),
+        platforms: splitExportList(cell(row, 'platforms')),
+        vn_id: cell(row, 'vn_id'),
+        url: cell(row, 'url'),
+        cover_url: cell(row, 'cover_url'),
+        original_title: cell(row, 'original_title'),
+        length_votes: parseRating(cell(row, 'length_votes')),
+        rating_votes: parseRating(cell(row, 'rating_votes')),
+        labels: splitExportList(cell(row, 'labels')),
+        status_ids: statusIds,
+      };
+    });
+    return normalizeVndbExportPayload({
+      sourceWebsite: getSourceWebsite('vndb'),
+      username: guessUsernameFromFilenameForSource('vndb', filename),
+      include_genres: index.has('tags') || index.has('genres'),
+      status_pill_config: csvStatusPillConfig,
+      items,
+    }, filename);
+  }
+
+  function parseVndbJsonExportPayload(text, filename = '') {
+    return normalizeVndbExportPayload(JSON.parse(text), filename);
+  }
+
+  function parseVndbHtmlExportPayload(text, filename = '') {
+    const doc = new DOMParser().parseFromString(text, 'text/html');
+    const payloadEl = doc.getElementById('payload');
+    if (payloadEl && payloadEl.textContent) return parseVndbJsonExportPayload(payloadEl.textContent, filename);
+    throw new Error('The HTML file does not contain a VNDB export payload.');
   }
 
   function parseJsonExportPayload(text, filename = '') {
@@ -7318,6 +12244,27 @@ ZX81`
     throw new Error('Unsupported source file type.');
   }
 
+  function parseVndbExportedPayload(text, format, filename = '') {
+    if (format === 'csv') return parseVndbCsvExportPayload(text, filename);
+    if (format === 'json') return parseVndbJsonExportPayload(text, filename);
+    if (format === 'html') return parseVndbHtmlExportPayload(text, filename);
+    throw new Error('Unsupported source file type.');
+  }
+
+  function parseGameFaqsExportedPayload(text, format, filename = '') {
+    if (format === 'csv') return parseGameFaqsCsvExportPayload(text, filename);
+    if (format === 'json') return parseGameFaqsJsonExportPayload(text, filename);
+    if (format === 'html') return parseGameFaqsHtmlExportPayload(text, filename);
+    throw new Error('Unsupported source file type.');
+  }
+
+  function parseIgdbExportedPayload(text, format, filename = '') {
+    if (format === 'csv') return parseIgdbCsvExportPayload(text, filename);
+    if (format === 'json') return parseIgdbJsonExportPayload(text, filename);
+    if (format === 'html') return parseIgdbHtmlExportPayload(text, filename);
+    throw new Error('Unsupported source file type.');
+  }
+
   function parseConverterPayload(text, format, filename = '', converterMode = 'backloggd') {
     return getSourceFormatDescriptor(converterMode).parseExportedPayload(text, format, filename);
   }
@@ -7340,6 +12287,240 @@ ZX81`
     if (format === 'csv') return { extension: 'csv', mime: 'text/csv;charset=utf-8', content: buildHowLongToBeatCsv(payload) };
     if (format === 'json') return { extension: 'json', mime: 'application/json;charset=utf-8', content: buildHowLongToBeatJson(payload) };
     if (format === 'html') return { extension: 'html', mime: 'text/html;charset=utf-8', content: buildHowLongToBeatHtml(payload) };
+    throw new Error('Unsupported export file type.');
+  }
+
+  function buildVndbCsv(payload) {
+    const headers = [
+      'release_date', 'title', 'status', 'average_rating', 'user_rating',
+      'languages',
+    ];
+    if (payload.include_genres) headers.push('tags');
+    headers.push(
+      'platforms', 'vn_id', 'url', 'cover_url', 'original_title',
+      'rating_votes', 'labels', 'status_ids',
+    );
+    const rows = (payload.items || []).map(rawItem => {
+      const item = normalizeVndbSharedExportItem(rawItem);
+      const row = [
+        item.release_date, item.title, (item.statuses || []).join('; '),
+        item.average_rating ?? '', item.user_rating ?? '', item.languages.join('; '),
+      ];
+      if (payload.include_genres) row.push(item.genres.join('; '));
+      row.push(
+        item.platforms.join('; '), item.vn_id, item.url, item.cover_url,
+        item.original_title, item.rating_votes ?? '',
+        item.labels.join('; '), item.statusIds.join('; '),
+      );
+      return row;
+    });
+    return '\uFEFF' + appendCsvStatusPillConfig(
+      [headers.join(','), ...rows.map(row => row.map(csvEscape).join(','))],
+      payload
+    ).join('\r\n');
+  }
+
+  function buildVndbJson(payload) {
+    const canonical = JSON.parse(buildSharedJson(payload, 'vndb', {
+      normalizeItem: normalizeVndbSharedExportItem,
+      defaultStatus: '',
+    }));
+    canonical.include_tags = canonical.include_genres;
+    delete canonical.include_genres;
+    canonical.items = (canonical.items || []).map(item => {
+      const exported = { ...item, tags: item.genres || [] };
+      delete exported.genres;
+      return exported;
+    });
+    return JSON.stringify(canonical, null, 2);
+  }
+
+  function buildVndbHtml(payload) {
+    const normalizedItems = (payload.items || []).map(normalizeVndbSharedExportItem);
+    const viewerPayload = buildMobyGamesViewerPayload({
+      ...payload,
+      sourceWebsite: getSourceWebsite('vndb'),
+      collections: [],
+      items: normalizedItems,
+    });
+    viewerPayload.sourceWebsite = getSourceWebsite('vndb');
+    viewerPayload.mobygames_genre_labels = [];
+    viewerPayload.igdb_genre_labels = [];
+    viewerPayload.mobygames_platform_labels = [];
+    viewerPayload.gamefaqs_platform_labels = [];
+    viewerPayload.igdb_platform_labels = [];
+    viewerPayload.include_genres = normalizedItems.some(item => (item.genres || []).length);
+    viewerPayload.include_platforms = normalizedItems.some(item => (item.platforms || []).length);
+    viewerPayload.include_languages = true;
+    viewerPayload.include_length = true;
+    viewerPayload.status_labels = {
+      ...(viewerPayload.status_labels || {}),
+      [makeMobyGamesStatusToken('vndb-wishlist-low', 'Wishlist Low')]: 'Wish-Low',
+      [makeMobyGamesStatusToken('vndb-wishlist-medium', 'Wishlist Medium')]: 'Wish-Migh',
+      [makeMobyGamesStatusToken('vndb-wishlist-high', 'Wishlist High')]: 'Wish-High',
+    };
+    viewerPayload.items = (viewerPayload.items || []).map((item, index) => ({
+      ...item,
+      languages: normalizedItems[index]?.languages || [],
+      length: normalizedItems[index]?.length || '',
+      genres: normalizedItems[index]?.genres || [],
+      platforms: normalizedItems[index]?.platforms || [],
+      source_meta: normalizedItems[index]?.source_meta || item.source_meta,
+    }));
+    return buildHtml(viewerPayload);
+  }
+
+  function buildVndbConvertedExport(payload, format) {
+    if (format === 'csv') return { extension: 'csv', mime: 'text/csv;charset=utf-8', content: buildVndbCsv(payload) };
+    if (format === 'json') return { extension: 'json', mime: 'application/json;charset=utf-8', content: buildVndbJson(payload) };
+    if (format === 'html') return { extension: 'html', mime: 'text/html;charset=utf-8', content: buildVndbHtml(payload) };
+    throw new Error('Unsupported export file type.');
+  }
+
+  function buildGameFaqsCsv(payload) {
+    const headers = [
+      'release_date', 'release_year', 'title', 'status', 'length',
+      'average_rating', 'genres', 'platforms', 'product_id', 'url', 'cover_url',
+      'lists', 'list_ids', 'status_ids', 'developer', 'publisher', 'description',
+      'date_published', 'user_rating_count', 'average_length_hours',
+      'length_rating_count', 'average_difficulty', 'difficulty_rating_count',
+      'difficulty_label', 'age_rating', 'age_rating_description',
+      'metacritic_score', 'metacritic_review_count', 'metacritic_url',
+    ];
+    const rows = (payload.items || []).map(rawItem => {
+      const item = normalizeGameFaqsSharedExportItem(rawItem);
+      return [
+        item.release_date || '', item.release_year || '', item.title || '',
+        (item.statuses || []).join('; '), item.length || '',
+        item.average_rating ?? '', (item.genres || []).join('; '),
+        (item.platforms || []).join('; '), item.product_id || '',
+        item.url || '', item.cover_url || '',
+        (item.lists || []).join('; '), (item.list_ids || []).join('; '),
+        (item.statusIds || []).join('; '),
+        item.source_meta.developer, item.source_meta.publisher,
+        item.source_meta.description, item.source_meta.date_published,
+        item.source_meta.user_rating_count ?? '',
+        item.source_meta.average_length_hours ?? '',
+        item.source_meta.length_rating_count ?? '',
+        item.source_meta.average_difficulty ?? '',
+        item.source_meta.difficulty_rating_count ?? '',
+        item.source_meta.difficulty_label, item.source_meta.age_rating,
+        item.source_meta.age_rating_description,
+        item.source_meta.metacritic_score ?? '',
+        item.source_meta.metacritic_review_count ?? '',
+        item.source_meta.metacritic_url,
+      ];
+    });
+    return appendCsvStatusPillConfig(
+      [headers.join(','), ...rows.map(row => row.map(csvEscape).join(','))],
+      payload
+    ).join('\r\n');
+  }
+
+  function buildGameFaqsJson(payload) {
+    return buildSharedJson(payload, 'gamefaqs', {
+      normalizeItem: normalizeGameFaqsSharedExportItem,
+      defaultStatus: '',
+    });
+  }
+
+  function buildGameFaqsHtml(payload) {
+    const normalizedItems = (payload.items || []).map(normalizeGameFaqsSharedExportItem);
+    const viewerPayload = buildMobyGamesViewerPayload({
+      ...payload,
+      sourceWebsite: getSourceWebsite('gamefaqs'),
+      items: normalizedItems.map(item => ({
+        ...item,
+        collection: item.lists.join('; '),
+        collections: item.lists,
+        collection_url: item.list_ids.length ? `gamefaqs-list:${item.list_ids[0]}` : '',
+        collection_urls: item.list_ids.map(id => `gamefaqs-list:${id}`),
+      })),
+    });
+    viewerPayload.sourceWebsite = getSourceWebsite('gamefaqs');
+    viewerPayload.mobygames_genre_labels = [];
+    viewerPayload.gamefaqs_platform_labels = GAMEFAQS_PLATFORM_LABELS;
+    viewerPayload.items = (viewerPayload.items || []).map((item, index) => ({
+      ...item,
+      source_meta: normalizedItems[index]?.source_meta || item.source_meta,
+    }));
+    return buildHtml(viewerPayload);
+  }
+
+  function buildGameFaqsConvertedExport(payload, format) {
+    if (format === 'csv') return { extension: 'csv', mime: 'text/csv;charset=utf-8', content: buildGameFaqsCsv(payload) };
+    if (format === 'json') return { extension: 'json', mime: 'application/json;charset=utf-8', content: buildGameFaqsJson(payload) };
+    if (format === 'html') return { extension: 'html', mime: 'text/html;charset=utf-8', content: buildGameFaqsHtml(payload) };
+    throw new Error('Unsupported export file type.');
+  }
+
+  function buildIgdbCsv(payload) {
+    const headers = [
+      'release_date', 'title', 'status', 'average_rating', 'user_rating',
+      'genres', 'platforms', 'game_id', 'url', 'cover_url', 'list', 'list_slug',
+      'source_status', 'status_ids', 'rating_count_label', 'igdb_genres', 'igdb_themes',
+      'platform_releases',
+    ];
+    const rows = (payload.items || []).map(rawItem => {
+      const item = normalizeIgdbSharedExportItem(rawItem);
+      return [
+        item.release_date || '', item.title || '',
+        (item.statuses || []).join('; '), item.average_rating ?? '', item.user_rating ?? '',
+        (item.genres || []).join('; '), (item.platforms || []).join('; '),
+        item.source_meta.game_id || '',
+        item.url || '', item.cover_url || '', item.source_meta.list || '',
+        item.source_meta.list_slug || '', item.source_meta.source_status || '',
+        (item.statusIds || []).join('; '),
+        item.source_meta.rating_count_label || '',
+        (item.source_meta.igdb_genres || []).join('; '),
+        (item.source_meta.igdb_themes || []).join('; '),
+        JSON.stringify(item.source_meta.platform_releases || []),
+      ];
+    });
+    return appendCsvStatusPillConfig(
+      [headers.join(','), ...rows.map(row => row.map(csvEscape).join(','))],
+      payload
+    ).join('\r\n');
+  }
+
+  function buildIgdbJson(payload) {
+    return buildSharedJson(payload, 'igdb', {
+      normalizeItem: normalizeIgdbSharedExportItem,
+      defaultStatus: '',
+    });
+  }
+
+  function buildIgdbHtml(payload) {
+    const normalizedItems = (payload.items || []).map(normalizeIgdbSharedExportItem);
+    const viewerPayload = buildMobyGamesViewerPayload({
+      ...payload,
+      sourceWebsite: getSourceWebsite('igdb'),
+      items: normalizedItems.map(item => ({
+        ...item,
+        collection: item.source_meta.list || '',
+        collections: item.source_meta.list ? [item.source_meta.list] : [],
+        collection_url: item.source_meta.list_slug ? `igdb-list:${item.source_meta.list_slug}` : '',
+        collection_urls: item.source_meta.list_slug ? [`igdb-list:${item.source_meta.list_slug}`] : [],
+      })),
+    });
+    viewerPayload.sourceWebsite = getSourceWebsite('igdb');
+    viewerPayload.mobygames_genre_labels = [];
+    viewerPayload.mobygames_platform_labels = [];
+    viewerPayload.igdb_genre_labels = IGDB_GENRE_LABELS;
+    viewerPayload.igdb_platform_labels = IGDB_PLATFORM_LABELS;
+    viewerPayload.include_genres = normalizedItems.some(item => (item.genres || []).length);
+    viewerPayload.include_platforms = normalizedItems.some(item => (item.platforms || []).length);
+    viewerPayload.items = (viewerPayload.items || []).map((item, index) => ({
+      ...item,
+      source_meta: normalizedItems[index]?.source_meta || item.source_meta,
+    }));
+    return buildHtml(viewerPayload);
+  }
+
+  function buildIgdbConvertedExport(payload, format) {
+    if (format === 'csv') return { extension: 'csv', mime: 'text/csv;charset=utf-8', content: buildIgdbCsv(payload) };
+    if (format === 'json') return { extension: 'json', mime: 'application/json;charset=utf-8', content: buildIgdbJson(payload) };
+    if (format === 'html') return { extension: 'html', mime: 'text/html;charset=utf-8', content: buildIgdbHtml(payload) };
     throw new Error('Unsupported export file type.');
   }
 
@@ -7386,6 +12567,45 @@ ZX81`
     },
   });
 
+  configureSourceDescriptor('vndb', {
+    formats: {
+      id: SOURCE_REGISTRY.vndb.id,
+      sourceWebsite: getSourceWebsite('vndb'),
+      supportedFormats: ['csv', 'json', 'html'],
+      parseExportedPayload: parseVndbExportedPayload,
+      buildConvertedExport: buildVndbConvertedExport,
+      buildCsv: buildVndbCsv,
+      buildJson: buildVndbJson,
+      buildHtml: buildVndbHtml,
+    },
+  });
+
+  configureSourceDescriptor('gamefaqs', {
+    formats: {
+      id: SOURCE_REGISTRY.gamefaqs.id,
+      sourceWebsite: getSourceWebsite('gamefaqs'),
+      supportedFormats: ['csv', 'json', 'html'],
+      parseExportedPayload: parseGameFaqsExportedPayload,
+      buildConvertedExport: buildGameFaqsConvertedExport,
+      buildCsv: buildGameFaqsCsv,
+      buildJson: buildGameFaqsJson,
+      buildHtml: buildGameFaqsHtml,
+    },
+  });
+
+  configureSourceDescriptor('igdb', {
+    formats: {
+      id: SOURCE_REGISTRY.igdb.id,
+      sourceWebsite: getSourceWebsite('igdb'),
+      supportedFormats: ['csv', 'json', 'html'],
+      parseExportedPayload: parseIgdbExportedPayload,
+      buildConvertedExport: buildIgdbConvertedExport,
+      buildCsv: buildIgdbCsv,
+      buildJson: buildIgdbJson,
+      buildHtml: buildIgdbHtml,
+    },
+  });
+
   function datePrefixForExport(date = new Date()) {
     return `${date.getFullYear()}.${String(date.getMonth() + 1).padStart(2, '0')}.${String(date.getDate()).padStart(2, '0')}`;
   }
@@ -7409,17 +12629,88 @@ ZX81`
   // 6. Network and version checks
   // ---------------------------------------------------------------------------
 
+  function describeNetworkFailure(error) {
+    if (!error) return 'unknown network error';
+    if (error.name === 'AbortError') return 'request timed out or was aborted';
+    if (error.status === 429) return 'HTTP 429 rate limit';
+    if (error.status === 408) return 'HTTP 408 request timeout';
+    if (error.status === 403) return 'HTTP 403 access restriction';
+    if (typeof error.status === 'number' && error.status >= 500) return `HTTP ${error.status} server error`;
+    if (typeof error.status === 'number') return `HTTP ${error.status}`;
+    return error.message || String(error);
+  }
+
+  function networkLogUrl(url) {
+    try {
+      const parsed = new URL(url, location.href);
+      return `${parsed.host}${parsed.pathname}${parsed.search}`;
+    } catch (_) {
+      return String(url || '');
+    }
+  }
+
+  function randomRequestDelayMs(minDelayMs, maxDelayMs = minDelayMs) {
+    const first = Math.max(0, Math.round(Number(minDelayMs) || 0));
+    const second = Math.max(0, Math.round(Number(maxDelayMs) || 0));
+    const min = Math.min(first, second);
+    const max = Math.max(first, second);
+    if (min === max) return min;
+    return min + Math.floor(Math.random() * (max - min + 1));
+  }
+
+  async function waitForRequestSlot(sourceId, minDelayMs, maxDelayMs = minDelayMs) {
+    const settings = loadRequestDelaySettings(sourceId, minDelayMs, maxDelayMs);
+    const delay = randomRequestDelayMs(settings.minMs, settings.maxMs);
+    if (!delay) return;
+    const now = Date.now();
+    const scheduledAt = Math.max(now, requestSlotTimes.get(sourceId) || 0);
+    requestSlotTimes.set(sourceId, scheduledAt + delay);
+    if (scheduledAt > now) {
+      await new Promise(resolve => setTimeout(resolve, scheduledAt - now));
+    }
+  }
+
   async function fetchHtml(url, options = {}) {
+    const resolvedUrl = new URL(url, location.href).href;
+    const useCache = options.cache !== false && isBackloggdHost();
+    if (useCache && backloggdHtmlResponseCache.has(resolvedUrl)) {
+      return backloggdHtmlResponseCache.get(resolvedUrl);
+    }
+    if (useCache && backloggdHtmlRequestCache.has(resolvedUrl)) {
+      return backloggdHtmlRequestCache.get(resolvedUrl);
+    }
+    const request = fetchHtmlUncached(resolvedUrl, options);
+    if (!useCache) return request;
+    backloggdHtmlRequestCache.set(resolvedUrl, request);
+    try {
+      const html = await request;
+      backloggdHtmlResponseCache.set(resolvedUrl, html);
+      while (backloggdHtmlResponseCache.size > BACKLOGGD_HTML_CACHE_LIMIT) {
+        backloggdHtmlResponseCache.delete(backloggdHtmlResponseCache.keys().next().value);
+      }
+      return html;
+    } finally {
+      backloggdHtmlRequestCache.delete(resolvedUrl);
+    }
+  }
+
+  async function fetchHtmlUncached(url, options = {}) {
     const MAX_ATTEMPTS = options.maxAttempts || 3;
     const TIMEOUT_MS = options.timeoutMs || 20000;
+    const retryStatuses = new Set(options.retryStatuses || []);
+    const retryDelaysMs = Array.isArray(options.retryDelaysMs) ? options.retryDelaysMs : null;
     let lastError = null;
+    let failureCount = 0;
 
     function shouldRetry(error) {
       if (!error) return true;
       if (error.name === 'AbortError') return true;
       if (error.retryable === false) return false;
       if (typeof error.status === 'number') {
-        return error.status === 408 || error.status === 429 || error.status >= 500;
+        return retryStatuses.has(error.status) ||
+          error.status === 408 ||
+          error.status === 429 ||
+          error.status >= 500;
       }
       return true;
     }
@@ -7428,9 +12719,16 @@ ZX81`
       checkExportCancelled();
       await waitIfExportPaused();
       if (attempt > 0) {
-        const base  = 1000 * Math.pow(2, attempt - 1);
+        const base = retryDelaysMs
+          ? retryDelaysMs[Math.min(attempt - 1, retryDelaysMs.length - 1)]
+          : 1000 * Math.pow(2, attempt - 1);
         const jitter = base * 0.25 * (Math.random() * 2 - 1);
-        await new Promise(resolve => setTimeout(resolve, Math.round(base + jitter)));
+        const delayMs = Math.max(0, Math.round(base + jitter));
+        addLog(
+          `Retrying ${networkLogUrl(url)} in ${(delayMs / 1000).toFixed(delayMs >= 10000 ? 0 : 1)}s (attempt ${attempt + 1} of ${MAX_ATTEMPTS})`,
+          'error'
+        );
+        await new Promise(resolve => setTimeout(resolve, delayMs));
         checkExportCancelled();
         await waitIfExportPaused();
       }
@@ -7439,30 +12737,87 @@ ZX81`
       if (controller) activeExportFetchControllers.add(controller);
       const timer = controller ? setTimeout(() => controller.abort(), TIMEOUT_MS) : null;
       try {
-        const response = await fetch(url, {
-          credentials: 'same-origin',
+        const text = await requestHtmlResponse(url, {
           signal: controller ? controller.signal : undefined,
         });
         checkExportCancelled();
-        if (!response.ok) {
-          const error = new Error(`${response.status} ${response.statusText} for ${url}`);
-          error.status = response.status;
-          error.retryable = response.status === 408 || response.status === 429 || response.status >= 500;
-          throw error;
+        if (failureCount > 0) {
+          addLog(
+            `Request recovered after ${failureCount} failed attempt${failureCount === 1 ? '' : 's'}: ${networkLogUrl(url)}`,
+            'info'
+          );
         }
-        const text = await response.text();
-        checkExportCancelled();
         return text;
       } catch (error) {
         if (exportCancelRequested) throw makeExportCancelledError();
+        if (typeof error.status === 'number') {
+          error.retryable = retryStatuses.has(error.status) ||
+            error.status === 408 ||
+            error.status === 429 ||
+            error.status >= 500;
+        }
         lastError = error;
-        if (!shouldRetry(error) || attempt === MAX_ATTEMPTS - 1) break;
+        failureCount += 1;
+        const retrying = shouldRetry(error) && attempt < MAX_ATTEMPTS - 1;
+        addLog(
+          `${describeNetworkFailure(error)} detected for ${networkLogUrl(url)}${retrying ? '; retry scheduled' : '; no retries remaining'}`,
+          'error'
+        );
+        if (!retrying) break;
       } finally {
         if (timer) clearTimeout(timer);
         if (controller) activeExportFetchControllers.delete(controller);
       }
     }
+    if (failureCount > 0) {
+      addLog(
+        `Request failed after ${failureCount} attempt${failureCount === 1 ? '' : 's'}: ${networkLogUrl(url)}`,
+        'error'
+      );
+    }
     throw lastError;
+  }
+
+  async function paginatePages({
+    startPage = 1,
+    maxPage = 1000,
+    initialSignatures = [],
+    loadPage,
+    getItems,
+    getSignature,
+    onPage,
+    shouldStop,
+  }) {
+    const signatures = new Set(initialSignatures.filter(Boolean));
+    let pagesLoaded = 0;
+    let lastPage = startPage - 1;
+    let stopReason = 'page-cap';
+
+    for (let page = startPage; page <= maxPage; page += 1) {
+      checkExportCancelled();
+      await waitIfExportPaused();
+      const result = await loadPage(page);
+      const items = getItems(result) || [];
+      lastPage = page;
+      if (!items.length) {
+        stopReason = 'empty';
+        break;
+      }
+      const signature = getSignature(result, page);
+      if (!signature || signatures.has(signature)) {
+        stopReason = signature ? 'repeated' : 'missing-signature';
+        break;
+      }
+      signatures.add(signature);
+      pagesLoaded += 1;
+      if (onPage) await onPage(result, page, items);
+      if (shouldStop && shouldStop(result, page, items)) {
+        stopReason = 'complete';
+        break;
+      }
+    }
+
+    return { pagesLoaded, lastPage, stopReason, signatures };
   }
 
   function parseVersionParts(value) {
@@ -7606,15 +12961,7 @@ ZX81`
   // 7. Backloggd scraping
   // ---------------------------------------------------------------------------
 
-  function getMaxPage(doc) {
-    let max = 1;
-    for (const anchor of doc.querySelectorAll('a[href*="page="]')) {
-      const parsed = new URL(anchor.getAttribute('href'), location.origin);
-      const page = Number(parsed.searchParams.get('page'));
-      if (Number.isFinite(page)) max = Math.max(max, page);
-    }
-    return max;
-  }
+  const getMaxPage = getDocumentMaxPage;
 
   function resolveCardUrl(card) {
     const link = card.querySelector('a.cover-link');
@@ -7942,7 +13289,7 @@ ZX81`
 
     for (let page = 2; page <= maxPage; page += 1) {
       addLog(`Reading library page ${page} of ${maxPage}`, 'info', 'lib-page-progress');
-      setProgressInRange(2, 36, page, maxPage);
+      setProgressInStage('basicLibrary', page, maxPage, 1, 20);
       const html   = await fetchHtml(`${base}?page=${page}`);
       const parsed = parseUnifiedPage(html, page);
 
@@ -8057,7 +13404,20 @@ ZX81`
       await waitIfExportPaused();
       let parsed;
       try {
-        const html = await fetchHtml(pathForPage(page));
+        const delaySettings = loadRequestDelaySettings(
+          'backloggd',
+          BACKLOGGD_FILTER_REQUEST_DELAY_MIN_MS,
+          BACKLOGGD_FILTER_REQUEST_DELAY_MAX_MS
+        );
+        await new Promise(resolve => setTimeout(
+          resolve,
+          randomRequestDelayMs(delaySettings.minMs, delaySettings.maxMs)
+        ));
+        const html = await fetchHtml(pathForPage(page), {
+          maxAttempts: BACKLOGGD_FILTER_RETRY_DELAYS_MS.length + 1,
+          retryStatuses: [403],
+          retryDelaysMs: BACKLOGGD_FILTER_RETRY_DELAYS_MS,
+        });
         parsed = parseReleasePage(html);
       } catch (error) {
         if (isExportCancelledError(error)) throw error;
@@ -8106,7 +13466,7 @@ ZX81`
       await waitIfExportPaused();
       try {
         addLog(`Reading release dates page ${page} of ${maxPage}`, 'info', 'release-dates-progress');
-        setProgressInRange(38, 65, page, maxPage);
+        setProgressInStage('basicRelease', page, maxPage, 70, 93);
         const html = await fetchHtml(`/u/${encodeURIComponent(getExportUserSlug())}/games/release/type:${COMBINED_TYPE}?page=${page}`);
         const parsed = parseReleasePage(html);
         maxPage = Math.max(maxPage, parsed.maxPage);
@@ -8166,7 +13526,7 @@ ZX81`
     for (let gi = 0; gi < GENRE_SLUGS.length; gi += 1) {
       const { label, slug } = GENRE_SLUGS[gi];
       addLog(`Genres ${gi + 1}/${GENRE_SLUGS.length}: ${label}`, 'info', 'genres-progress');
-      setProgressInRange(42, 65, gi + 1, GENRE_SLUGS.length);
+      setProgressInStage('genres', gi + 1, GENRE_SLUGS.length, 20, 40);
 
       await scrapeReleaseFilteredPages({
         pathForPage: page => `/u/${encodeURIComponent(getExportUserSlug())}/games/release/type:${COMBINED_TYPE};genre:${slug}?page=${page}`,
@@ -8202,7 +13562,7 @@ ZX81`
     for (let pi = 0; pi < slugList.length; pi += 1) {
       const { label, slug } = slugList[pi];
       addLog(`${logPrefix} ${pi + 1}/${slugList.length}: ${label}`, 'info', progressKey);
-      setProgressInRange(66, 82, pi + 1, slugList.length);
+      setProgressInStage('platforms', pi + 1, slugList.length, 40, 93);
 
       await scrapeReleaseFilteredPages({
         pathForPage: page => `/u/${encodeURIComponent(getExportUserSlug())}/games/release/type:${COMBINED_TYPE};release_platform:${slug}?page=${page}`,
@@ -8255,7 +13615,8 @@ ZX81`
     addLog(`Fetching ${missing.length} release dates from game pages (${missingCount} missing, ${yearOnlyCount} year-only)`);
 
     let completed = 0;
-    await mapWithConcurrency(missing, DETAIL_FETCH_CONCURRENCY, async row => {
+    const concurrency = loadRequestDelaySettings('backloggd').concurrency;
+    await mapWithConcurrency(missing, concurrency, async row => {
       try {
         const html = await fetchHtml(row.url);
         const detailDate = parseDetailReleaseDate(html);
@@ -8291,7 +13652,7 @@ ZX81`
         if (!exportCancelRequested) {
           completed += 1;
           addLog(`Detail date checks ${completed} of ${missing.length}`, 'info', 'detail-date-progress');
-          setProgressInRange(88, 92, completed, missing.length);
+          setProgressInStage('details', completed, missing.length, 93, 95);
         }
       }
     });
@@ -8301,6 +13662,205 @@ ZX81`
     }
 
     return { detailReleaseByUrl, failures };
+  }
+
+  function getBackloggdListDetailUrl(listUrl, page = 1) {
+    const url = new URL(listUrl, location.origin);
+    url.pathname = `${url.pathname.replace(/\/+$/, '')}/user/detail/`;
+    if (page > 1) url.searchParams.set('page', String(page));
+    else url.searchParams.delete('page');
+    return url.href;
+  }
+
+  function parseBackloggdListDetailDocument(doc, pageUrl = location.href) {
+    const items = [];
+    for (const entry of doc.querySelectorAll('.detail-list-entry')) {
+      const titleLink = entry.querySelector('.game-name a[href^="/games/"]')
+        || entry.querySelector('a[href^="/games/"]');
+      const cover = entry.querySelector('.game-cover[game_id]');
+      const image = entry.querySelector('img.card-img, .game-cover img');
+      if (!titleLink && !image) continue;
+      items.push({
+        title: String(titleLink?.textContent || image?.getAttribute('alt') || '').trim().replace(/\s+/g, ' '),
+        url: titleLink ? new URL(titleLink.getAttribute('href'), pageUrl).href : '',
+        cover_url: image?.getAttribute('src') || '',
+        game_id: cover?.getAttribute('game_id') || '',
+      });
+    }
+    return { items, maxPage: getMaxPage(doc) };
+  }
+
+  function getBackloggdConfiguredListMappings(config = statusPillConfig, collections = []) {
+    const knownByUrl = new Map(collections.map(collection => [collection.url, collection]));
+    const mappings = [];
+    getAllStatusPillsFromConfig(config).forEach(pill => {
+      normalizeStatusPillCollections(pill.collections).forEach(collection => {
+        if (!/\/u\/[^/?#]+\/list\//i.test(collection.url)) return;
+        const status = canonicalStatusFromPill(pill, collection.name);
+        mappings.push({
+          status,
+          collection: knownByUrl.get(collection.url) || collection,
+        });
+      });
+    });
+    return mappings;
+  }
+
+  async function scrapeBackloggdList(mapping, listIndex, listTotal) {
+    const rows = [];
+    let page = 1;
+    let maxPage = 1;
+    let previousUrls = null;
+    while (page <= maxPage) {
+      addLog(
+        `Lists ${listIndex + 1}/${listTotal}: ${mapping.collection.name}, page ${page}${maxPage > 1 ? ` of ${maxPage}` : ''}`,
+        'info',
+        'backloggd-list-progress'
+      );
+      const detailUrl = getBackloggdListDetailUrl(mapping.collection.url, page);
+      const html = await fetchHtml(detailUrl);
+      const doc = new DOMParser().parseFromString(html, 'text/html');
+      const parsed = parseBackloggdListDetailDocument(doc, detailUrl);
+      maxPage = Math.max(maxPage, parsed.maxPage);
+      const urls = parsed.items.map(item => item.url);
+      if (isDuplicateUrlPage(urls, previousUrls)) break;
+      previousUrls = new Set(urls);
+      rows.push(...parsed.items.map(item => ({
+        ...item,
+        status: mapping.status.label,
+        statuses: [mapping.status.label],
+        status_id: mapping.status.id,
+        status_ids: [mapping.status.id],
+        status_color: mapping.status.color,
+        list: mapping.collection.name,
+        list_url: mapping.collection.url,
+      })));
+      if (!parsed.items.length) break;
+      page += 1;
+    }
+    return rows;
+  }
+
+  function findBackloggdGameDetailRow(doc, label) {
+    const wanted = String(label || '').trim().toLowerCase();
+    for (const header of doc.querySelectorAll('.game-details-header')) {
+      if (String(header.textContent || '').trim().toLowerCase() === wanted) {
+        return header.closest('.row') || header.parentElement;
+      }
+    }
+    return null;
+  }
+
+  function findBackloggdJsonLdAggregateRating(value) {
+    if (!value || typeof value !== 'object') return null;
+    if (Array.isArray(value)) {
+      for (const entry of value) {
+        const found = findBackloggdJsonLdAggregateRating(entry);
+        if (found) return found;
+      }
+      return null;
+    }
+    if (value['@type'] === 'AggregateRating' && value.ratingValue != null) return value;
+    if (value.aggregateRating) {
+      const found = findBackloggdJsonLdAggregateRating(value.aggregateRating);
+      if (found) return found;
+    }
+    if (value['@graph']) return findBackloggdJsonLdAggregateRating(value['@graph']);
+    return null;
+  }
+
+  function parseBackloggdGamePageAdvancedDocument(doc) {
+    let averageRating = null;
+    for (const script of doc.querySelectorAll('script[type="application/ld+json"]')) {
+      try {
+        const aggregate = findBackloggdJsonLdAggregateRating(JSON.parse(script.textContent || 'null'));
+        if (aggregate) {
+          averageRating = normalizeAverageRatingValue(aggregate.ratingValue);
+          break;
+        }
+      } catch (_) {}
+    }
+
+    const checkedRating = doc.querySelector('.star-radio[checked], input.star-radio:checked');
+    const rawUserRating = checkedRating ? Number(checkedRating.getAttribute('value')) : NaN;
+    const userRating = Number.isFinite(rawUserRating) && rawUserRating > 0 ? rawUserRating / 2 : null;
+    const releaseRow = findBackloggdGameDetailRow(doc, 'Released');
+    const genresRow = findBackloggdGameDetailRow(doc, 'Genres');
+    const releaseDate = releaseRow
+      ? String(releaseRow.querySelector('.game-details-value')?.textContent || '').trim().replace(/\s+/g, ' ')
+      : '';
+    const genres = genresRow
+      ? uniqueSortedLabels([...genresRow.querySelectorAll('.game-details-value')].map(node => node.textContent))
+      : [];
+    const platforms = uniqueSortedLabels(
+      [...doc.querySelectorAll('#game-page-platforms .game-page-platform')].map(node => node.textContent)
+    );
+    const lengths = {};
+    for (const block of doc.querySelectorAll('.time-played-overview .time-played')) {
+      const label = String(block.querySelector('.label')?.textContent || '').trim().replace(/\s+/g, ' ');
+      const value = String(block.querySelector('.stat-value.element-revealed, .stat-value')?.textContent || '').trim().replace(/\s+/g, ' ');
+      if (label && value) lengths[label] = value;
+    }
+    const averageLengthKey = Object.keys(lengths).find(key => /^average$/i.test(key));
+    const length = averageLengthKey ? lengths[averageLengthKey] : Object.values(lengths)[0] || '';
+    return { averageRating, userRating, releaseDate, genres, platforms, lengths, length };
+  }
+
+  async function enrichBackloggdListItems(items) {
+    let completed = 0;
+    const failures = [];
+    const concurrency = loadRequestDelaySettings('backloggd').concurrency;
+    await mapWithConcurrency(items, concurrency, async item => {
+      try {
+        const cacheKey = new URL(item.url, location.origin).href;
+        let details = backloggdGameDetailCache.get(cacheKey);
+        if (!details) {
+          const html = await fetchHtml(cacheKey);
+          const doc = new DOMParser().parseFromString(html, 'text/html');
+          details = parseBackloggdGamePageAdvancedDocument(doc);
+          backloggdGameDetailCache.set(cacheKey, details);
+        }
+        item.average_rating = details.averageRating;
+        item.user_rating = details.userRating;
+        item.release_date = details.releaseDate;
+        item.genres = details.genres;
+        item.platforms = details.platforms;
+        item.length = details.length;
+        item.lengths = details.lengths;
+      } catch (error) {
+        if (isExportCancelledError(error)) throw error;
+        failures.push(item.title);
+      } finally {
+        completed += 1;
+        addLog(`Lists Advanced: ${completed} of ${items.length} game pages`, 'info', 'backloggd-list-advanced-progress');
+        setProgressInStage('advanced', completed, items.length, 20, 95);
+      }
+    });
+    return failures;
+  }
+
+  function mergeBackloggdListRows(rows) {
+    const byGame = new Map();
+    rows.forEach(row => {
+      const key = normalizeGameKey(row);
+      const current = byGame.get(key);
+      if (!current) {
+        byGame.set(key, {
+          ...row,
+          lists: [row.list],
+          list_urls: [row.list_url],
+          status_ids: [...(row.status_ids || [])],
+        });
+        return;
+      }
+      if (!current.statuses.includes(row.status)) current.statuses.push(row.status);
+      (row.status_ids || []).forEach(statusId => {
+        if (!current.status_ids.includes(statusId)) current.status_ids.push(statusId);
+      });
+      if (!current.lists.includes(row.list)) current.lists.push(row.list);
+      if (!current.list_urls.includes(row.list_url)) current.list_urls.push(row.list_url);
+    });
+    return [...byGame.values()];
   }
 
   async function mapWithConcurrency(items, limit, mapper) {
@@ -8360,15 +13920,18 @@ ZX81`
   }
 
   function buildCsv(payload) {
-    // Column order: release_date, title, status, average_rating, [user_rating,] [genres,] [platforms,] game_id, url, cover_url
+    // Column order includes canonical language and length fields for every source.
     // "page" column is omitted.
     // For played items, "status" uses the play sub-status (play_type) when available,
     // falling back to "Played" only when no sub-status is recorded.
+    const isListsExport = payload.extract_target === 'lists';
     const headers = ['release_date', 'title', 'status', 'average_rating'];
     headers.push('user_rating');
+    if (isListsExport && payload.include_length) headers.push('length');
     if (payload.include_genres)   headers.push('genres');
     if (payload.include_platforms) headers.push('platforms');
     headers.push('game_id', 'url', 'cover_url');
+    if (isListsExport) headers.push('list', 'list_url', 'lists', 'list_urls');
 
     function resolveStatus(item) {
       // For played items, show the play sub-status if available; otherwise "Played"
@@ -8378,16 +13941,19 @@ ZX81`
       return STATUS_LABELS[item.status] || item.status;
     }
 
-    return [
+    return appendCsvStatusPillConfig([
       headers.join(','),
       ...payload.items.map(item => headers.map(h => {
         if (h === 'status')    return csvEscape(resolveStatus(item));
         if (h === 'genres')    return csvEscape((item.genres    || []).join('; '));
+        if (h === 'languages') return csvEscape((item.languages || []).join('; '));
         if (h === 'platforms') return csvEscape((item.platforms || []).join('; '));
+        if (h === 'lists') return csvEscape((item.lists || []).join('; '));
+        if (h === 'list_urls') return csvEscape((item.list_urls || []).join('; '));
         if (h === 'average_rating') return csvEscape(normalizeAverageRatingValue(item.average_rating) ?? '');
         return csvEscape(item[h]);
       }).join(',')),
-    ].join('\r\n');
+    ], payload).join('\r\n');
   }
 
   function buildMobyGamesCsv(payload) {
@@ -8406,15 +13972,13 @@ ZX81`
       'collection',
       'collection_url',
       'release_year',
-      'full_release_date',
       'status_ids',
     ];
     const rows = payload.items.map(rawItem => {
       const item = normalizeMobyGamesSharedExportItem(rawItem);
       const releaseYear = String(mobyItemReleaseYear(item) || '');
       const fullReleaseDate = mobyItemFullReleaseDate(item);
-      const releaseDate = formatAbbreviatedReleaseDate(fullReleaseDate) || releaseYear;
-      const formattedFullReleaseDate = formatAbbreviatedReleaseDate(fullReleaseDate) || fullReleaseDate;
+      const releaseDate = fullReleaseDate || releaseYear;
       const url = mobyItemUrl(item);
       return [
         releaseDate,
@@ -8431,15 +13995,13 @@ ZX81`
         item.collection,
         mobyItemCollectionUrl(item),
         releaseYear,
-        formattedFullReleaseDate,
         (item.statusIds || item.status_ids || []).join('; '),
       ];
     });
-    return [
-      '# Exported from MobyGames',
+    return appendCsvStatusPillConfig([
       headers.join(','),
       ...rows.map(row => row.map(csvEscape).join(',')),
-    ].join('\r\n');
+    ], payload).join('\r\n');
   }
 
   function buildHowLongToBeatCsv(payload) {
@@ -8447,6 +14009,7 @@ ZX81`
       'release_date',
       'title',
       'status',
+      'length',
       'average_rating',
       'user_rating',
       'genres',
@@ -8465,6 +14028,7 @@ ZX81`
         item.release_date || '',
         item.title || item.name,
         (item.statuses && item.statuses.length ? item.statuses : [item.status]).filter(Boolean).join('; '),
+        item.length || '',
         normalizeAverageRatingValue(item.average_rating) ?? '',
         item.user_rating == null ? '' : item.user_rating,
         (item.genres || []).join('; '),
@@ -8477,11 +14041,10 @@ ZX81`
         (item.statusIds || item.status_ids || []).join('; '),
       ];
     });
-    return [
-      '# Exported from HowLongToBeat',
+    return appendCsvStatusPillConfig([
       headers.join(','),
       ...rows.map(row => row.map(csvEscape).join(',')),
-    ].join('\r\n');
+    ], payload).join('\r\n');
   }
 
   function getMobyGamesUserRating(item) {
@@ -8694,6 +14257,8 @@ ZX81`
         average_rating: normalizeAverageRatingValue(averageRating),
         user_rating: userRating,
         release_date: releaseDate,
+        languages: uniqueSortedLabels(item.languages || []),
+        length: item.length || '',
         play_type: null,
         genres: getMobyGamesMetadataTags(item),
         platforms,
@@ -8717,6 +14282,8 @@ ZX81`
       raw_counts: counts,
       include_genres: items.some(item => (item.genres || []).length),
       include_platforms: true,
+      include_languages: items.some(item => (item.languages || []).length),
+      include_length: items.some(item => item.length),
       include_platforms226: false,
       mobygames_platform_labels: MOBYGAMES_PLATFORM_LABELS,
       mobygames_genre_labels: MOBYGAMES_GENRE_LABELS,
@@ -8746,6 +14313,7 @@ ZX81`
     });
     viewerPayload.sourceWebsite = getSourceWebsite('howlongtobeat');
     viewerPayload.mobygames_genre_labels = [];
+    viewerPayload.mobygames_platform_labels = [];
     viewerPayload.howlongtobeat_category_labels = [...new Set(normalizedItems.flatMap(item => item.categories || (item.category ? [item.category] : [])))];
     viewerPayload.items = (viewerPayload.items || []).map((item, index) => {
       const source = normalizedItems[index] || {};
@@ -8765,7 +14333,15 @@ ZX81`
     return buildHtml(viewerPayload);
   }
 
+  function claimDownloadFilename(filename) {
+    const downloadKey = String(filename || '').toLowerCase();
+    if (downloadedFilenamesThisSession.has(downloadKey)) return false;
+    downloadedFilenamesThisSession.add(downloadKey);
+    return true;
+  }
+
   function downloadText(filename, mimeType, content) {
+    if (!claimDownloadFilename(filename)) return false;
     const blob = new Blob([content], { type: mimeType });
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement('a');
@@ -8775,6 +14351,7 @@ ZX81`
     anchor.click();
     anchor.remove();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
+    return true;
   }
 
 
@@ -8961,11 +14538,12 @@ ZX81`
       .filter((url, index, arr) => arr.indexOf(url) === index);
     const coverByUrl = new Map();
     let failed = 0;
+    let consecutiveFailures = 0;
 
     for (let i = 0; i < coverEntries.length; i += 1) {
       const url = coverEntries[i];
       addLog(`Embedding offline covers ${i + 1} of ${coverEntries.length}`, 'info', 'offline-covers-progress');
-      setProgressInRange(92, 99, i + 1, coverEntries.length);
+      setProgressInRange(95, 99, i + 1, coverEntries.length);
       try {
         const blob = await fetchImageBlob(url);
         checkExportCancelled();
@@ -8978,9 +14556,15 @@ ZX81`
           height: size.height,
           orientation: size.orientation,
         });
+        consecutiveFailures = 0;
       } catch (error) {
         if (isExportCancelledError(error)) throw error;
         failed += 1;
+        consecutiveFailures += 1;
+        if (consecutiveFailures >= CONSECUTIVE_SCRAPE_FAILURE_LIMIT) {
+          removeLog('offline-covers-progress');
+          throw new Error(`Offline cover scraping stopped after ${CONSECUTIVE_SCRAPE_FAILURE_LIMIT} consecutive failures.`);
+        }
       }
     }
 
@@ -9107,7 +14691,11 @@ ZX81`
     h1 { margin: 0; font-size: clamp(15px, 2vw, 27px); line-height: 1; letter-spacing: 0; }
     .sub { margin: 8px 0 0; color: var(--muted); }
     .stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
-    body.backloggd .stats { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    body.backloggd:not(.show-play-types) .stats,
+    body.backloggd:not(.show-play-types) .stats.stats-wrap {
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 8px;
+    }
     body.backloggd.show-play-types .stats { grid-template-columns: repeat(4, minmax(0, 1fr)); }
     /* -- Overflow-aware wrapping for status pills --- */
     /* Applied by JS when stat text overflows at current width */
@@ -9124,13 +14712,21 @@ ZX81`
     .stat-sub-pill { }
     /* The played group takes the same slot as the played button */
     .stat { padding: 13px 15px; border: 1px solid var(--line); border-radius: 14px; background: var(--panel-soft); color: var(--ink); cursor: pointer; text-align: left; font: inherit; transition: border-color 0.15s ease, box-shadow 0.15s ease, transform 0.15s ease; min-height: 100px; }
+    body.backloggd:not(.show-play-types) .stat {
+      min-width: 0;
+      padding-right: 10px;
+      padding-left: 10px;
+    }
     .stat[data-status-filter="played"] { box-shadow: inset 3px 0 0 var(--played); }
     .stat[data-status-filter="playing"] { box-shadow: inset 3px 0 0 var(--playing); }
     .stat[data-status-filter="backlog"] { box-shadow: inset 3px 0 0 var(--backlog); }
     .stat[data-status-filter="wishlist"] { box-shadow: inset 3px 0 0 var(--wishlist); }
+    body.igdb .stat[data-igdb-default-status="played"] { box-shadow: inset 3px 0 0 var(--played); }
+    body.igdb .stat[data-igdb-default-status="playing"] { box-shadow: inset 3px 0 0 var(--playing); }
+    body.igdb .stat[data-igdb-default-status="backlog"] { box-shadow: inset 3px 0 0 var(--backlog); }
     .stat:hover { transform: translateY(-1px); border-color: rgba(125,211,252,0.55); }
     .stat.active { border-color: rgba(125,211,252,0.82); box-shadow: 0 0 0 3px rgba(125,211,252,0.14), inset 3px 0 0 rgba(125,211,252,0.88), inset 0 1px 0 rgba(255,255,255,0.10); }
-    .stat span { display: block; color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; }
+    .stat span { display: block; color: var(--muted); font-size: 14px; text-transform: uppercase; letter-spacing: 0.08em; }
     .stat strong { display: block; margin-top: 5px; font-size: 22px; }
     /* -- Genre filter bar --- */
     .genre-bar {
@@ -9533,6 +15129,31 @@ ZX81`
     }
     body.black .genre-tag { color: color-mix(in srgb, var(--gc) 88%, #fff); }
     body.black .genre-tag.active { color: #fff; }
+    .genre-text-list {
+      color: var(--ink);
+      font-size: 12px;
+      line-height: 1.45;
+      overflow-wrap: anywhere;
+    }
+    .genre-text-toggle {
+      display: inline;
+      margin: 0 0 0 5px;
+      padding: 1px 5px;
+      border: 1px solid color-mix(in srgb, #7dd3fc 45%, transparent);
+      border-radius: 5px;
+      background: color-mix(in srgb, #7dd3fc 10%, transparent);
+      color: #7dd3fc;
+      font: inherit;
+      font-size: 11px;
+      font-weight: 700;
+      line-height: 1.2;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .genre-text-toggle:hover {
+      border-color: color-mix(in srgb, #7dd3fc 75%, transparent);
+      background: color-mix(in srgb, #7dd3fc 18%, transparent);
+    }
     /* Per-genre colour injection */
     ${genreColorCss}
     /* -- Platform chips --- */
@@ -10131,6 +15752,7 @@ ZX81`
     body.mobygames .cover.cover-portrait { width: 48px; height: 72px; }
     .cover.hidden { display: none; }
     .title { font-weight: 800; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .original-title { margin-top: 3px; color: var(--muted); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .url { margin-top: 3px; color: var(--muted); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .pill { display: inline-flex; justify-content: center; min-width: 86px; padding: 7px 11px; border-radius: 999px; color: #fff; font-size: 13px; font-weight: 800; cursor: pointer; user-select: none; transition: box-shadow 0.14s; }
     .pill:hover { box-shadow: 0 0 0 1.5px rgba(255,255,255,0.40); }
@@ -10315,30 +15937,77 @@ ZX81`
     .stat-played-total-badge { display: none; }
     body.mobygames .stat[data-status-filter=\"played\"] { display: none; }
     body.backloggd.show-play-types .stat[data-status-filter=\"played\"] { display: none; }
-    /* -- Configured status pill typography (HLTB & MobyGames): match Backloggd sub-status pill sizing --- */
-    body.mobygames .stat-config-pill .sub-pill-header { font-size: 11px; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; }
-    body.mobygames .stat-config-pill .sub-pill-total  { font-size: 15px; font-weight: 800; letter-spacing: 0; text-transform: none; }
-    body.mobygames .stat-config-pill .sub-name        { font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; }
-    body.mobygames .stat-config-pill .sub-num         { font-size: 16px; font-weight: 800; }
-    body.mobygames .stat-config-pill .sub-dot         { width: 8px; height: 8px; }
-    @container (max-width: 130px) {
-      body.mobygames .stat-config-pill .sub-pill-header { font-size: 9px; }
-      body.mobygames .stat-config-pill .sub-pill-total  { font-size: 12px; }
-      body.mobygames .stat-config-pill .sub-name        { font-size: 10px; }
-      body.mobygames .stat-config-pill .sub-num         { font-size: 13px; }
+    body.backloggd .backloggd-configured-statuses { display: none; }
+    body.backloggd.show-play-types .backloggd-configured-statuses { display: contents; }
+    body.backloggd.show-play-types .backloggd-main-status { display: none; }
+    body.igdb .igdb-default-statuses { display: contents; }
+    body.igdb .igdb-configured-statuses { display: none; }
+    body.igdb.show-play-types .igdb-default-statuses { display: none; }
+    body.igdb.show-play-types .igdb-configured-statuses { display: contents; }
+    body.igdb:not(.show-play-types) .stats,
+    body.igdb:not(.show-play-types) .stats.stats-wrap {
+      grid-template-columns: repeat(4, minmax(0, 1fr));
     }
-    @container (max-width: 100px) {
-      body.mobygames .stat-config-pill .sub-pill-header { font-size: 8px; }
-      body.mobygames .stat-config-pill .sub-pill-total  { font-size: 10px; }
-      body.mobygames .stat-config-pill .sub-name        { font-size: 8px; }
-      body.mobygames .stat-config-pill .sub-num         { font-size: 11px; }
+    /* -- Shared configured-pill typography, scaled by the number of pills in a group --- */
+    .stat-config-pill .sub-pill-header { font-size: 11px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; }
+    .stat-config-pill .sub-pill-total  { font-size: 14px; font-weight: 800; letter-spacing: 0; text-transform: none; }
+    .stat-config-pill .sub-name        { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; }
+    .stat-config-pill .sub-num         { font-size: 14px; font-weight: 800; }
+    .stat-config-pill .sub-dot         { width: 7px; height: 7px; }
+    .stat-config-pill.config-pill-count-3 .sub-pill-header,
+    .stat-config-pill.config-pill-count-3 .sub-name { font-size: 12px; }
+    .stat-config-pill.config-pill-count-2 .sub-pill-header,
+    .stat-config-pill.config-pill-count-2 .sub-name { font-size: 13px; }
+    .stat-config-pill.config-pill-count-1 {
+      padding: 0;
+      border: none;
+      background: transparent;
+      overflow: visible;
     }
+    .stat-config-pill.config-pill-count-1 > .sub-pill-header,
+    .stat-config-pill.config-pill-count-1 > .stat-sub {
+      box-sizing: border-box;
+      width: 100%;
+      height: 100px;
+      min-height: 100px;
+      padding: 13px 15px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: var(--panel-soft);
+      color: var(--ink);
+      display: block;
+      text-align: left;
+    }
+    .stat-config-pill.config-pill-count-1 > .stat-sub {
+      border-left: 3px solid var(--sub-color, #888);
+    }
+    .stat-config-pill.config-pill-count-1 .sub-pill-header,
+    .stat-config-pill.config-pill-count-1 .sub-name {
+      display: block;
+      flex: none;
+      color: var(--muted);
+      font-size: 14px;
+      font-weight: 400;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    .stat-config-pill.config-pill-count-1 .sub-pill-total,
+    .stat-config-pill.config-pill-count-1 .sub-num {
+      display: block;
+      margin-top: 5px;
+      color: var(--ink);
+      font-size: 22px;
+      font-weight: 800;
+    }
+    .stat-config-pill.config-pill-count-1 .sub-dot { display: none; }
     /* -- Hide empty-filter controls in HLTB exports only --- */
     body.howlongtobeat #genreShowEmpty    { display: none !important; }
     body.howlongtobeat #platformShowEmpty { display: none !important; }
     .num { font-variant-numeric: tabular-nums; font-weight: 800; }
     .rating-col,
     .user-rating-col { text-align: center; }
+    .language-col { font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; }
+    .length-col { text-align: center; white-space: nowrap; }
     .release-col { text-align: right; }
     th.release-col { text-align: center; }
     td.release-col { white-space: nowrap; }
@@ -10364,11 +16033,14 @@ ZX81`
     /* -- Column visibility: hidden states --- */
     body.hide-col-genres .genre-col { display: none !important; }
     body.hide-col-genres th.genre-col { display: none !important; }
+    body.hide-col-languages .language-col { display: none !important; }
+    body.hide-col-length .length-col { display: none !important; }
     body.hide-col-status td:has(.status-pills) { display: none !important; }
     body.hide-col-status th[data-sort="status"] { display: none !important; }
     body.hide-col-avg-rating .rating-col { display: none !important; }
     body.hide-col-user-rating .user-rating-col { display: none !important; }
     body.hide-col-release-date .release-col { display: none !important; }
+    body.hide-original-title .original-title { display: none !important; }
     body.hide-col-link .url { display: none !important; }
     body.hide-col-platforms .platform-chips { display: none !important; }
     /* -- Filter visibility toggle buttons (Genres / Platforms) --- */
@@ -10720,10 +16392,44 @@ ZX81`
       }).length;
       if (statusIdCount) return statusIdCount;
     }
-    if (!pill.source) return 0;
-    if (pill.source.type === 'play_type') return playTypeCounts[pill.source.value] || 0;
-    if (pill.source.type === 'status') return (payload.counts && payload.counts[pill.source.value]) || 0;
-    return 0;
+    const backloggdSources = normalizeStatusPillCollections(pill.collections)
+      .map(collection => collection.url.match(/^backloggd-source:(.+)$/)?.[1])
+      .map(sourceId => STATUS_PILL_SOURCE_DEFS[sourceId])
+      .filter(Boolean);
+    const sources = backloggdSources.length ? backloggdSources : (pill.source ? [pill.source] : []);
+    return sources.reduce((sum, source) => {
+      if (source.type === 'play_type') return sum + (playTypeCounts[source.value] || 0);
+      if (source.type === 'status') return sum + ((payload.counts && payload.counts[source.value]) || 0);
+      return sum;
+    }, 0);
+  }
+
+  function payloadItemMatchesConfiguredStatusPill(item, pill) {
+    if (!item || !pill) return false;
+    const statusId = String(pill.id || '').trim();
+    const sourceMeta = item.source_meta && typeof item.source_meta === 'object' ? item.source_meta : {};
+    const ids = Array.isArray(item.statusIds) && item.statusIds.length
+      ? item.statusIds
+      : Array.isArray(item.status_ids) && item.status_ids.length
+        ? item.status_ids
+        : Array.isArray(sourceMeta.status_ids)
+          ? sourceMeta.status_ids
+          : [];
+    if (statusId && ids.some(id => String(id || '').trim() === statusId)) return true;
+    const backloggdSources = (Array.isArray(pill.collections) ? pill.collections : [])
+      .map(collection => collection && collection.url ? String(collection.url) : '')
+      .map(url => url.match(/^backloggd-source:(.+)$/)?.[1])
+      .map(sourceId => STATUS_PILL_SOURCE_DEFS[sourceId])
+      .filter(Boolean);
+    const sources = backloggdSources.length ? backloggdSources : (pill.source ? [pill.source] : []);
+    const statuses = statusList(item);
+    return sources.some(source => {
+      if (source.type === 'play_type') {
+        return statuses.includes('played') && (item.play_type || null) === source.value;
+      }
+      if (source.type === 'status') return statuses.includes(source.value);
+      return false;
+    });
   }
 
   function buildConfiguredStatusStatsHtml(config, payload, playTypeCounts) {
@@ -10736,15 +16442,20 @@ ZX81`
     const countForPill = pill => {
       if (!pill) return 0;
       if (pill.kind === 'aggregate') {
-        return (pill.sources || []).reduce((sum, id) => sum + countForPill(statusPills.get(id)), 0);
+        const sourcePills = (pill.sources || []).map(id => statusPills.get(id)).filter(Boolean);
+        return (payload.items || []).filter(item =>
+          sourcePills.some(sourcePill => payloadItemMatchesConfiguredStatusPill(item, sourcePill))
+        ).length;
       }
       return countForConfiguredStatusPill(pill, payload, playTypeCounts);
     };
     const attrsForPill = pill => {
       return '';
     };
-    return (config.categories || []).map((category, categoryIndex) => `
-        <div class="stat-sub-pill stat-config-pill" data-status-category="${escapeHtml(category.id || `cat-${categoryIndex}`)}">
+    return (config.categories || []).map((category, categoryIndex) => {
+      const pillCount = Math.max(1, Math.min(4, (category.pills || []).length));
+      return `
+        <div class="stat-sub-pill stat-config-pill config-pill-count-${pillCount}" data-status-category="${escapeHtml(category.id || `cat-${categoryIndex}`)}">
           ${(category.pills || []).map(pill => {
             if (pill.kind === 'aggregate') {
               const sourceIds = (pill.sources || []).join(',');
@@ -10752,16 +16463,51 @@ ZX81`
             }
             return `<button class="stat-sub" type="button" data-config-status-id="${escapeHtml(pill.id)}"${attrsForPill(pill)} style="--sub-color:${escapeHtml(pill.color || '#7dd3fc')}"><span class="sub-dot"></span><span class="sub-name">${escapeHtml(pill.label || 'Status Pill')}</span><span class="sub-num">${countForPill(pill)}</span></button>`;
           }).join('\n          ')}
-        </div>`).join('\n');
+        </div>`;
+    }).join('\n');
   }
 
-  function buildViewerHeroHtml({ payload, generated, genreBarHtml, platformFilterHtml, playTypeCounts, playedTotal, queueTotal }) {
+  function buildViewerHeroHtml({ payload, generated, genreBarHtml, platformFilterHtml, languageFilterHtml, playTypeCounts, playedTotal, queueTotal, viewerOptions }) {
     const statusPillConfigForPayload = getStatusPillConfigForPayload(payload);
-    const sourceName = sourceLabelForWebsite(payload.sourceWebsite);
-    const isHowLongToBeatViewer = isSourceWebsite(payload.sourceWebsite, 'howlongtobeat');
-    const isMobyGamesViewer = isSourceWebsite(payload.sourceWebsite, 'mobygames') || isHowLongToBeatViewer;
-    const statsHtml = statusPillConfigForPayload
-      ? `${isMobyGamesViewer ? `<button class="stat active" type="button" data-status-filter="all"><span>Total</span><strong>${payload.total}</strong></button>` : ''}${buildConfiguredStatusStatsHtml(statusPillConfigForPayload, payload, playTypeCounts)}`
+    const sourceDescriptor = getSourceDescriptorByWebsite(payload.sourceWebsite);
+    const sourceName = sourceDescriptor.label;
+    const isBackloggdConfigured = sourceDescriptor.id === 'backloggd' && statusPillConfigForPayload;
+    const isBackloggdListsExport = isBackloggdConfigured && payload.extract_target === 'lists';
+    const isIgdbConfigured = sourceDescriptor.id === 'igdb' && statusPillConfigForPayload;
+    const igdbDefaultCounts = { played: 0, playing: 0, backlog: 0 };
+    if (isIgdbConfigured) {
+      (payload.items || []).forEach(item => {
+        const sourceMeta = item.source_meta && typeof item.source_meta === 'object' ? item.source_meta : {};
+        const values = [
+          sourceMeta.source_status,
+          sourceMeta.list,
+          sourceMeta.list_slug,
+          item.collection,
+          ...(item.collections || []),
+        ].map(value => String(value || '').trim().toLowerCase());
+        if (values.some(value => value === 'played' || value === 'played-no status')) igdbDefaultCounts.played += 1;
+        if (values.some(value => value === 'playing' || value === 'currently playing' || value === 'playing-no status')) igdbDefaultCounts.playing += 1;
+        if (values.some(value => value === 'want to play' || value === 'want-to-play' || value === 'backlog' || value === 'want-no status')) igdbDefaultCounts.backlog += 1;
+      });
+    }
+    const backloggdMainStats = `
+        <button class="stat active" type="button" data-status-filter="all"><span>Total</span><strong>${payload.total}</strong></button>
+        <button class="stat backloggd-main-status" type="button" data-status-filter="played"><span>Played</span><strong>${payload.counts.played || 0}</strong></button>
+        <button class="stat backloggd-main-status" type="button" data-status-filter="playing"><span>Playing</span><strong>${payload.counts.playing || 0}</strong></button>
+        <button class="stat backloggd-main-status" type="button" data-status-filter="backlog"><span>Backlog</span><strong>${payload.counts.backlog || 0}</strong></button>
+        <button class="stat backloggd-main-status" type="button" data-status-filter="wishlist"><span>Wishlist</span><strong>${payload.counts.wishlist || 0}</strong></button>`;
+    const statsHtml = isBackloggdConfigured
+      ? `${backloggdMainStats}<div class="backloggd-configured-statuses">${buildConfiguredStatusStatsHtml(statusPillConfigForPayload, payload, playTypeCounts)}</div>`
+      : isIgdbConfigured
+        ? `<button class="stat active" type="button" data-status-filter="all"><span>Total</span><strong>${payload.total}</strong></button>
+          <div class="igdb-default-statuses">
+            <button class="stat" type="button" data-igdb-default-status="played"><span>Played</span><strong>${igdbDefaultCounts.played}</strong></button>
+            <button class="stat" type="button" data-igdb-default-status="playing"><span>Playing</span><strong>${igdbDefaultCounts.playing}</strong></button>
+            <button class="stat" type="button" data-igdb-default-status="backlog"><span>Backlog</span><strong>${igdbDefaultCounts.backlog}</strong></button>
+          </div>
+          <div class="igdb-configured-statuses">${buildConfiguredStatusStatsHtml(statusPillConfigForPayload, payload, playTypeCounts)}</div>`
+      : statusPillConfigForPayload
+      ? `${viewerOptions.statusPillConfiguration ? `<button class="stat active" type="button" data-status-filter="all"><span>Total</span><strong>${payload.total}</strong></button>` : ''}${buildConfiguredStatusStatsHtml(statusPillConfigForPayload, payload, playTypeCounts)}`
       : `
         <button class="stat active" type="button" data-status-filter="all"><span>Total</span><strong>${payload.total}</strong></button>
         <button class="stat" type="button" data-status-filter="played"><span>Played</span><strong>${payload.counts.played || 0}</strong></button>
@@ -10793,7 +16539,11 @@ ZX81`
           <p class="sub">Generated ${generated}. Click a game to open it on ${sourceName}.</p>
         </div>
         <div class="head-actions">
-          ${isMobyGamesViewer ? '' : '<label class="toggle genre-substat-toggle-tb"><input id="playSubStatuses" type="checkbox"> Played Sub-Statuses</label>'}
+          ${isBackloggdListsExport
+            ? '<input id="playSubStatuses" type="checkbox" checked hidden>'
+            : (isBackloggdConfigured || isIgdbConfigured)
+              ? '<label class="toggle genre-substat-toggle-tb"><input id="playSubStatuses" type="checkbox"> Custom Statuses</label>'
+              : ''}
           <label class="toggle"><input id="statusFilterCounter" type="checkbox"> Filtered Status Counts</label>
           <label class="toggle"><input id="lightMode" type="checkbox"> Light Mode</label>
           <p class="sub" id="countLabel"></p>
@@ -10804,6 +16554,7 @@ ${statsHtml}
       </div>
       ${genreBarHtml}
       ${platformFilterHtml}
+      ${languageFilterHtml}
     </section>`;
   }
 
@@ -10819,7 +16570,7 @@ ${statsHtml}
 `;
   }
 
-  function buildViewerScript({ payload, statusLabelsJson, statusColorsJson = '{}', playTypeLabelsJson, playTypeColorsJson, tableWidths, playTypeCounts, queueTotal, statusPriority = STATUS_PRIORITY }) {
+  function buildViewerScript({ payload, viewerOptions, statusLabelsJson, statusColorsJson = '{}', playTypeLabelsJson, playTypeColorsJson, tableWidths, playTypeCounts, queueTotal, statusPriority = STATUS_PRIORITY }) {
     return `    const STATUS_LABELS = ${statusLabelsJson};
     const STATUS_COLORS_MAP = ${statusColorsJson};
     const PLAY_TYPE_LABELS_MAP = ${playTypeLabelsJson};
@@ -10828,15 +16579,29 @@ ${statsHtml}
     const PLAY_TYPE_COUNTS_ORIG = ${escapeJsonForHtml(JSON.stringify(playTypeCounts))};
     const QUEUE_TOTAL_ORIG = ${queueTotal};
     const payload = JSON.parse(document.getElementById('payload').textContent);
+    const VIEWER_OPTIONS = ${escapeJsonForHtml(JSON.stringify(viewerOptions))};
+    const GENRE_LABEL = VIEWER_OPTIONS.genreLabel || 'Genres';
+    const GENRE_LABEL_LOWER = GENRE_LABEL.toLocaleLowerCase();
     const MOBYGAMES_GENRE_LABELS = payload.mobygames_genre_labels || [];
+    const IGDB_GENRE_LABELS = payload.igdb_genre_labels || [];
     const MOBYGAMES_SOURCE_WEBSITE = ${escapeJsonForHtml(JSON.stringify(getSourceWebsite('mobygames')))};
     const HLTB_SOURCE_WEBSITE = ${escapeJsonForHtml(JSON.stringify(getSourceWebsite('howlongtobeat')))};
+    const VNDB_SOURCE_WEBSITE = ${escapeJsonForHtml(JSON.stringify(getSourceWebsite('vndb')))};
+    const GAMEFAQS_SOURCE_WEBSITE = ${escapeJsonForHtml(JSON.stringify(getSourceWebsite('gamefaqs')))};
+    const IGDB_SOURCE_WEBSITE = ${escapeJsonForHtml(JSON.stringify(getSourceWebsite('igdb')))};
     const IS_MOBYGAMES_SOURCE_VIEWER = payload.sourceWebsite === MOBYGAMES_SOURCE_WEBSITE;
     const IS_HLTB_VIEWER = payload.sourceWebsite === HLTB_SOURCE_WEBSITE;
-    const IS_MOBYGAMES_VIEWER = IS_MOBYGAMES_SOURCE_VIEWER || IS_HLTB_VIEWER;
-    document.body.classList.toggle('mobygames', IS_MOBYGAMES_VIEWER);
+    const IS_VNDB_VIEWER = payload.sourceWebsite === VNDB_SOURCE_WEBSITE;
+    const IS_GAMEFAQS_VIEWER = payload.sourceWebsite === GAMEFAQS_SOURCE_WEBSITE;
+    const IS_IGDB_VIEWER = payload.sourceWebsite === IGDB_SOURCE_WEBSITE;
+    const USE_DEFAULT_LAYOUT = VIEWER_OPTIONS.layout === 'default';
+    const USE_SEARCH_GENRE_UI = VIEWER_OPTIONS.genreFilterUi === 'search';
+    const USE_PROVIDED_GENRE_TOTAL = VIEWER_OPTIONS.genreTotalSource === 'provided' || VIEWER_OPTIONS.showEmptyGenres;
+    const USE_PROVIDED_PLATFORM_TOTAL = VIEWER_OPTIONS.platformTotalSource === 'provided' || VIEWER_OPTIONS.showEmptyPlatforms;
+    document.body.classList.toggle('mobygames', USE_DEFAULT_LAYOUT);
     document.body.classList.toggle('howlongtobeat', IS_HLTB_VIEWER);
-    document.body.classList.toggle('backloggd', !IS_MOBYGAMES_VIEWER);
+    document.body.classList.toggle('backloggd', !USE_DEFAULT_LAYOUT);
+    document.body.classList.toggle('igdb', IS_IGDB_VIEWER);
     const STATUS_PILL_CONFIG = payload.status_pill_config || null;
     const rowsTbody = document.getElementById('rows');
     const tableWrap = document.getElementById('tableWrap');
@@ -10867,8 +16632,20 @@ ${statsHtml}
     const platformMatchAllBtn = document.getElementById('platformMatchAll');
     const platformShowAllBtn = document.getElementById('platformShowAll');
     const platformShowEmptyBtn = document.getElementById('platformShowEmpty');
+    const languageSearchInput = document.getElementById('languageSearchInput');
+    const languageSearchClear = document.getElementById('languageSearchClear');
+    const languageSearchResults = document.getElementById('languageSearchResults');
+    const languageShowAllBtn = document.getElementById('languageShowAll');
+    const languageMatchAllBtn = document.getElementById('languageMatchAll');
+    const languageFilterBar = document.getElementById('languageFilterBar');
+    const languageFilterPills = document.getElementById('languageFilterPills');
+    const languageFilterClear = document.getElementById('languageFilterClear');
+    const gamesDisplayedLanguageNum = document.getElementById('gamesDisplayedLanguageNum');
+    const languagesDisplayedNum = document.getElementById('languagesDisplayedNum');
+    const languagesDisplayedTotal = document.getElementById('languagesDisplayedTotal');
     const filtersGenresBtn = document.getElementById('filtersGenresBtn');
     const filtersPlatformsBtn = document.getElementById('filtersPlatformsBtn');
+    const filtersLanguagesBtn = document.getElementById('filtersLanguagesBtn');
     const gamesDisplayedPlatformNum = document.getElementById('gamesDisplayedPlatformNum');
     const platformsDisplayedNum = document.getElementById('platformsDisplayedNum');
     const platformsDisplayedTotal = document.getElementById('platformsDisplayedTotal');
@@ -10882,8 +16659,11 @@ ${statsHtml}
     const dfMonth = document.getElementById('dfMonth');
     const dfDay   = document.getElementById('dfDay');
     const dfClear = document.getElementById('dfClear');
+    const seriesDateOrderChk = document.getElementById('seriesDateOrder');
     const STATUS_PRIORITY = ${escapeJsonForHtml(JSON.stringify(statusPriority))};
     const statusOrderIndex = s => STATUS_PRIORITY[s] ?? 99;
+    const NATURAL_COLLATOR = new Intl.Collator(undefined, { sensitivity: 'base', numeric: true });
+    const compareNatural = (a, b) => NATURAL_COLLATOR.compare(String(a || ''), String(b || ''));
 
     function tableCanScrollX() {
       return tableWrap && tableWrap.scrollWidth > tableWrap.clientWidth + 1;
@@ -10945,9 +16725,15 @@ ${statsHtml}
     const BACKLOGGD_KNOWN_PLATFORM_LABELS = ${JSON.stringify(
       (payload.include_platforms226 ? ALL_PLATFORM_SLUGS : PLATFORM_SLUGS).map(p => p.label)
     )};
-    const ALL_KNOWN_PLATFORM_LABELS = IS_MOBYGAMES_SOURCE_VIEWER || IS_HLTB_VIEWER
-      ? (payload.mobygames_platform_labels || [])
-      : BACKLOGGD_KNOWN_PLATFORM_LABELS;
+    const ALL_KNOWN_PLATFORM_LABELS = USE_PROVIDED_PLATFORM_TOTAL
+      ? (IS_MOBYGAMES_SOURCE_VIEWER
+        ? (payload.mobygames_platform_labels || [])
+        : IS_IGDB_VIEWER
+          ? (payload.igdb_platform_labels || [])
+        : IS_GAMEFAQS_VIEWER
+          ? (payload.gamefaqs_platform_labels || [])
+          : BACKLOGGD_KNOWN_PLATFORM_LABELS)
+      : [];
 
     // -- Genre pill grid layout ---
     // Distributes visible genre pills across rows as a rectangle.
@@ -10974,7 +16760,7 @@ ${statsHtml}
       if (visibleCount === 0) { grid.style.display = 'none'; return 0; }
       grid.style.display = '';
 
-      if (!IS_MOBYGAMES_VIEWER) {
+      if (!USE_SEARCH_GENRE_UI) {
         const emojisOn = document.body.classList.contains('show-genre-emojis');
         const baseRowH  = emojisOn ? 44 : 36;
         const containerW = grid.parentElement ? grid.parentElement.offsetWidth : 600;
@@ -11227,17 +17013,22 @@ ${statsHtml}
     }
 
     // -- State ---
-    let sortKey = 'title';
-    let sortDir = 'asc';
+    let sortKey = '';
+    let sortDir = '';
     let statusFilter = 'all';
     let playTypeFilter = null;  // null = no play_type filter active
     let aggregateSourceFilter = null; // array of configured status-pill ids
+    let igdbDefaultStatusFilter = null;
     let activeGenres = new Set();
     let matchAll = true;   // AND mode by default
     let query = '';
     let dateFilter = { year: null, month: null, day: null };
+    let seriesDateOrder = true;
     let activePlatforms = new Set();  // supports multiple platform filters
     let platformMatchAll = false;  // false = OR (any), true = AND (all)
+    let activeLanguages = new Set();
+    let languageMatchAll = false;
+    let languageShowingAll = false;
     let genreCountMap = new Map(); // genre slug -> count used for MobyGames pill badges
     let platformCountMap = new Map(); // platform label -> count used for pill badges (context-dependent, see render())
     // Static total counts across the entire exported dataset - computed once, never changes.
@@ -11249,20 +17040,28 @@ ${statsHtml}
         platformTotalCountMap.set(p, (platformTotalCountMap.get(p) || 0) + 1);
       });
     });
-    const exportedPlatformLabels = [...platformTotalCountMap.keys()].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
-    const allKnownPlatformLabels = (IS_MOBYGAMES_SOURCE_VIEWER
-      ? [...new Set(ALL_KNOWN_PLATFORM_LABELS)]
-      : IS_HLTB_VIEWER
-        ? [...new Set(exportedPlatformLabels)]
-      : [...new Set([...ALL_KNOWN_PLATFORM_LABELS, ...exportedPlatformLabels])])
-      .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
+    const exportedPlatformLabels = [...platformTotalCountMap.keys()].sort(compareNatural);
+    const allKnownPlatformLabels = (USE_PROVIDED_PLATFORM_TOTAL
+      ? [...new Set([...ALL_KNOWN_PLATFORM_LABELS, ...exportedPlatformLabels])]
+      : [...new Set(exportedPlatformLabels)])
+      .sort(compareNatural);
     let platformShowingAll = false;    // true while "Show All" pill grid is open
     let platformShowingEmpty = false;  // true while "Empty Platforms" pill grid is open
+    const languageTotalCountMap = new Map();
+    payload.items.forEach(item => {
+      (item.languages || []).forEach(language => {
+        languageTotalCountMap.set(language, (languageTotalCountMap.get(language) || 0) + 1);
+      });
+    });
+    const exportedLanguageLabels = [...languageTotalCountMap.keys()]
+      .sort(compareNatural);
+    let languageCountMap = new Map(languageTotalCountMap);
     const mobyGenreLabelBySlug = new Map();
     const exportedMobyGenreLabels = [...new Set(payload.items.flatMap(item => item.genres || []))]
-      .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
-    const allKnownMobyGenreLabels = [...new Set(IS_HLTB_VIEWER ? exportedMobyGenreLabels : [...MOBYGAMES_GENRE_LABELS, ...exportedMobyGenreLabels])]
-      .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
+      .sort(compareNatural);
+    const providedGenreLabels = IS_IGDB_VIEWER ? IGDB_GENRE_LABELS : MOBYGAMES_GENRE_LABELS;
+    const allKnownMobyGenreLabels = [...new Set(USE_PROVIDED_GENRE_TOTAL ? [...providedGenreLabels, ...exportedMobyGenreLabels] : exportedMobyGenreLabels)]
+      .sort(compareNatural);
     allKnownMobyGenreLabels.forEach(label => mobyGenreLabelBySlug.set(genreSlug(label), label));
     let genreShowingAll = false;    // true while MobyGames "Show All" genre pill grid is open
     let genreShowingEmpty = false;  // true while MobyGames "Empty Genres" pill grid is open
@@ -11283,6 +17082,15 @@ ${statsHtml}
     function genreSlug(label) {
       return label.replace(/[^a-z0-9]/gi, '-').toLowerCase();
     }
+    function probableSeriesPrefix(value) {
+      const normalized = normalizeTitle(value)
+        .replace(/[^\\p{L}\\p{N}]+/gu, ' ')
+        .trim();
+      const words = normalized.split(/\\s+/).filter(Boolean);
+      if (words.length < 2) return '';
+      const prefix = words.slice(0, 2).join(' ');
+      return prefix.length >= 8 ? prefix : '';
+    }
 
     // -- Date parsing ---
     const parseDateParts = ${parseDateParts.toString()};
@@ -11291,9 +17099,20 @@ ${statsHtml}
       const m = String(releaseDate || '').match(/\\b(19|20)\\d{2}\\b/);
       return m ? Number(m[0]) : null;
     }
+    function releaseDatePartsForFilter(releaseDate) {
+      const raw = String(releaseDate || '').trim();
+      const parts = parseDateParts(raw);
+      if (parts) return parts;
+      let m = raw.match(/\\b(\\d{4})[-/.](\\d{1,2})(?:[-/.](\\d{1,2}))?\\b/);
+      if (m) return { year: Number(m[1]), month: Number(m[2]), day: m[3] ? Number(m[3]) : null };
+      m = raw.match(/\\b(\\d{1,2})[-/.](\\d{1,2})[-/.](\\d{4})\\b/);
+      if (m) return { year: Number(m[3]), month: Number(m[1]), day: Number(m[2]) };
+      m = raw.match(/\\b(\\d{4})\\b/);
+      return m ? { year: Number(m[1]), month: null, day: null } : null;
+    }
     function dateMatchesFilter(releaseDate, f) {
       if (!f.year && !f.month && !f.day) return true;
-      const parts = parseDateParts(releaseDate);
+      const parts = releaseDatePartsForFilter(releaseDate);
       if (!parts) {
         if (f.year && !f.month && !f.day) return releaseYearFallback(releaseDate) === f.year;
         return false;
@@ -11308,18 +17127,78 @@ ${statsHtml}
     }
 
     // -- Item prep ---
-    const items = payload.items.map(item => {
+    const seriesPrefixCounts = new Map();
+    payload.items.forEach(item => {
+      const prefix = probableSeriesPrefix(item.title);
+      if (prefix) seriesPrefixCounts.set(prefix, (seriesPrefixCounts.get(prefix) || 0) + 1);
+    });
+    const items = payload.items.map((item, originalIndex) => {
       const statusesList = Array.isArray(item.statuses) && item.statuses.length ? item.statuses : [item.status];
       const platformList = item.platforms || [];
+      const languageList = item.languages || [];
+      const sourceMeta = item.source_meta && typeof item.source_meta === 'object' ? item.source_meta : {};
+      const rawStatusIds = Array.isArray(item.statusIds) && item.statusIds.length
+        ? item.statusIds
+        : Array.isArray(item.status_ids) && item.status_ids.length
+          ? item.status_ids
+          : Array.isArray(sourceMeta.status_ids) && sourceMeta.status_ids.length
+            ? sourceMeta.status_ids
+            : item.statusId || item.status_id
+              ? [item.statusId || item.status_id]
+              : [];
+      const originalTitle = String(item.original_title || (item.source_meta && item.source_meta.original_title) || '').trim();
+      const probableSeries = probableSeriesPrefix(item.title);
+      const titleKey = normalizeTitle(item.title);
       return {
         ...item,
+        originalIndex,
         statusesList,
+        statusIdList: [...new Set(rawStatusIds.map(id => String(id || '').trim()).filter(Boolean))],
+        igdbStatusValues: [
+          sourceMeta.source_status,
+          sourceMeta.list,
+          sourceMeta.list_slug,
+          item.collection,
+          ...(item.collections || []),
+        ].map(value => String(value || '').trim().toLowerCase()),
         platformSet: new Set(platformList),
-        sortedPlatforms: [...platformList].sort((a, b) => a.localeCompare(b)),
-        titleKey: normalizeTitle(item.title),
+        languageSet: new Set(languageList),
+        sortedPlatforms: [...platformList].sort(compareNatural),
+        titleKey,
+        seriesKey: probableSeries && (seriesPrefixCounts.get(probableSeries) || 0) > 1 ? probableSeries : titleKey,
+        originalTitle,
+        originalTitleKey: normalizeTitle(originalTitle),
         releaseSort: toSortableDate(item.release_date),
         ratingSort: item.average_rating == null ? null : Number(item.average_rating),
         userRatingSort: item.user_rating == null ? null : Number(item.user_rating),
+        lengthSort: (() => {
+          const raw = String(item.length || '').trim();
+          if (!raw) return null;
+          const fractionValues = { '\u00bc': 0.25, '\u00bd': 0.5, '\u00be': 0.75 };
+          const hours = raw.match(/(?:(?<whole>[\\d,.]+)\\s*(?<suffix>[\u00bc\u00bd\u00be])?|(?<fraction>[\u00bc\u00bd\u00be]))\\s*(?:hours?|hrs?|h)\\b/i);
+          const minutes = raw.match(/([\\d,.]+)\\s*(?:minutes?|mins?|m)\\b/i);
+          let totalMinutes = 0;
+          let matched = false;
+          if (hours) {
+            const wholeHours = hours.groups.whole ? Number(hours.groups.whole.replace(/,/g, '')) : 0;
+            const fractionSymbol = hours.groups.suffix || hours.groups.fraction || '';
+            const fractionHours = fractionSymbol ? fractionValues[fractionSymbol] : 0;
+            if (Number.isFinite(wholeHours)) {
+              totalMinutes += (wholeHours + fractionHours) * 60;
+              matched = true;
+            }
+          }
+          if (minutes) {
+            const minuteValue = Number(minutes[1].replace(/,/g, ''));
+            if (Number.isFinite(minuteValue)) {
+              totalMinutes += minuteValue;
+              matched = true;
+            }
+          }
+          if (matched) return totalMinutes;
+          const numeric = Number(raw.replace(/,/g, ''));
+          return Number.isFinite(numeric) ? numeric * 60 : null;
+        })(),
         statusSort: STATUS_PRIORITY[item.status] ?? 99,
         genreSlugSet: new Set((item.genres || []).map(g => genreSlug(g))),
       };
@@ -11327,26 +17206,50 @@ ${statsHtml}
 
     // -- Sorting ---
     function compare(a, b) {
+      if (!sortKey) {
+        if (!seriesDateOrder) return compareNatural(a.titleKey, b.titleKey);
+        const seriesResult = compareNatural(a.seriesKey, b.seriesKey);
+        if (seriesResult) return seriesResult;
+        if (a.releaseSort && b.releaseSort && a.releaseSort !== b.releaseSort) {
+          return a.releaseSort < b.releaseSort ? -1 : 1;
+        }
+        if (a.releaseSort && !b.releaseSort) return -1;
+        if (!a.releaseSort && b.releaseSort) return 1;
+        return compareNatural(a.titleKey, b.titleKey);
+      }
       let left = a.titleKey, right = b.titleKey;
       if (sortKey === 'release_date') { left = a.releaseSort; right = b.releaseSort; }
       else if (sortKey === 'status') { left = a.statusSort; right = b.statusSort; }
+      else if (sortKey === 'length') {
+        if (a.lengthSort == null && b.lengthSort == null) return compareNatural(a.titleKey, b.titleKey);
+        if (a.lengthSort == null) return 1; if (b.lengthSort == null) return -1;
+        left = a.lengthSort; right = b.lengthSort;
+      }
       else if (sortKey === 'average_rating') {
-        if (a.ratingSort == null && b.ratingSort == null) return a.titleKey.localeCompare(b.titleKey, undefined, { sensitivity: 'base', numeric: true });
+        if (a.ratingSort == null && b.ratingSort == null) return compareNatural(a.titleKey, b.titleKey);
         if (a.ratingSort == null) return 1; if (b.ratingSort == null) return -1;
         left = a.ratingSort; right = b.ratingSort;
       } else if (sortKey === 'user_rating') {
-        if (a.userRatingSort == null && b.userRatingSort == null) return a.titleKey.localeCompare(b.titleKey, undefined, { sensitivity: 'base', numeric: true });
+        if (a.userRatingSort == null && b.userRatingSort == null) return compareNatural(a.titleKey, b.titleKey);
         if (a.userRatingSort == null) return 1; if (b.userRatingSort == null) return -1;
         left = a.userRatingSort; right = b.userRatingSort;
       }
       if (left < right) return sortDir === 'asc' ? -1 : 1;
       if (left > right) return sortDir === 'asc' ? 1 : -1;
-      return a.titleKey.localeCompare(b.titleKey, undefined, { sensitivity: 'base', numeric: true });
+      return compareNatural(a.titleKey, b.titleKey);
     }
 
     function setSort(key) {
-      if (sortKey === key) sortDir = sortDir === 'asc' ? 'desc' : 'asc';
-      else { sortKey = key; sortDir = (key === 'release_date' || key === 'average_rating' || key === 'user_rating') ? 'desc' : 'asc'; }
+      const preferredDir = (key === 'release_date' || key === 'average_rating' || key === 'user_rating' || key === 'length') ? 'desc' : 'asc';
+      if (sortKey !== key) {
+        sortKey = key;
+        sortDir = preferredDir;
+      } else if (sortDir === preferredDir) {
+        sortDir = preferredDir === 'asc' ? 'desc' : 'asc';
+      } else {
+        sortKey = '';
+        sortDir = '';
+      }
       thSorts.forEach(th => {
         th.classList.remove('sort-asc', 'sort-desc');
         const arrow = th.querySelector('.sort-arrow');
@@ -11357,8 +17260,8 @@ ${statsHtml}
           if (arrow) arrow.textContent = '\u21c5';
         }
       });
-      lsSet('bgdSortKey', sortKey);
-      lsSet('bgdSortDir', sortDir);
+      lsSet('bgdSortKeyV2', sortKey);
+      lsSet('bgdSortDirV2', sortDir);
       scheduleRender();
     }
 
@@ -11379,7 +17282,7 @@ ${statsHtml}
 
     function genreLabelForSlug(slug) {
       const btn = currentGenreButtons().find(entry => entry.dataset.genre === slug);
-      if (IS_MOBYGAMES_VIEWER && mobyGenreLabelBySlug.has(slug)) return mobyGenreLabelBySlug.get(slug);
+      if (USE_SEARCH_GENRE_UI && mobyGenreLabelBySlug.has(slug)) return mobyGenreLabelBySlug.get(slug);
       return (btn && btn.dataset.genreLabel) || slug;
     }
 
@@ -11431,14 +17334,14 @@ ${statsHtml}
     }
 
     function syncMobyGenreDisplayedCounter(count) {
-      if (!IS_MOBYGAMES_VIEWER || !genresDisplayedNum) return;
+      if (!USE_SEARCH_GENRE_UI || !genresDisplayedNum) return;
       genresDisplayedNum.textContent = count;
     }
 
     function getMobyGenreModeLabels() {
       const q = genreSearchQuery();
       if (q) return allKnownMobyGenreLabels.filter(label => normalizeTitle(label).includes(q));
-      if (genreShowingEmpty && !IS_HLTB_VIEWER) return allKnownMobyGenreLabels.filter(label => (genreCountMap.get(genreSlug(label)) || 0) === 0);
+      if (genreShowingEmpty && VIEWER_OPTIONS.showEmptyGenres) return allKnownMobyGenreLabels.filter(label => (genreCountMap.get(genreSlug(label)) || 0) === 0);
       return allKnownMobyGenreLabels.filter(label => (genreCountMap.get(genreSlug(label)) || 0) > 0);
     }
 
@@ -11470,7 +17373,7 @@ ${statsHtml}
     }
 
     function renderMobyGenreModePills() {
-      if (!IS_MOBYGAMES_VIEWER) return false;
+      if (!USE_SEARCH_GENRE_UI) return false;
       const availableLabels = getMobyGenreModeLabels();
       const renderedLabels = (!genreSearchQuery() && !genreShowingAll && !genreShowingEmpty) ? [] : availableLabels;
       renderMobyGenrePillGrid(renderedLabels);
@@ -11480,7 +17383,7 @@ ${statsHtml}
 
     function syncGenreSearchResults() {
       if (!genreSearchInput) return;
-      if (IS_MOBYGAMES_VIEWER && renderMobyGenreModePills()) {
+      if (USE_SEARCH_GENRE_UI && renderMobyGenreModePills()) {
         if (genreSearchClear) genreSearchClear.style.display = genreSearchQuery() ? '' : 'none';
         return;
       }
@@ -11506,7 +17409,7 @@ ${statsHtml}
       });
       document.querySelectorAll('.genre-tag').forEach(tag => tag.classList.toggle('active', activeGenres.has(tag.dataset.genre)));
       if (genreMatchBtn) genreMatchBtn.classList.toggle('active', matchAll);
-      if (IS_MOBYGAMES_VIEWER) {
+      if (USE_SEARCH_GENRE_UI) {
         syncGenreShowAllState();
         syncGenreShowEmptyState();
       }
@@ -11514,7 +17417,7 @@ ${statsHtml}
         genreFilterBar.classList.toggle('visible', activeGenres.size > 0);
         if (genreFilterPills && activeGenres.size > 0) {
           genreFilterPills.innerHTML = '';
-          [...activeGenres].sort((a, b) => genreLabelForSlug(a).localeCompare(genreLabelForSlug(b), undefined, { sensitivity: 'base' })).forEach(g => {
+          [...activeGenres].sort((a, b) => compareNatural(genreLabelForSlug(a), genreLabelForSlug(b))).forEach(g => {
             const pill = document.createElement('span');
             pill.className = 'platform-filter-pill active';
             pill.textContent = genreLabelForSlug(g);
@@ -11528,7 +17431,7 @@ ${statsHtml}
     }
 
     function setGenreFilter(slug, on) {
-      if (IS_MOBYGAMES_VIEWER && on && (genreCountMap.get(slug) || 0) === 0) return;
+      if (USE_SEARCH_GENRE_UI && on && (genreCountMap.get(slug) || 0) === 0) return;
       if (on) activeGenres.add(slug); else activeGenres.delete(slug);
       syncGenreUI();
       syncGenreSearchResults();
@@ -11678,6 +17581,120 @@ ${statsHtml}
       scheduleRender();
     }
 
+    function syncLanguageUI() {
+      if (languageSearchClear) {
+        languageSearchClear.style.display = languageSearchInput && languageSearchInput.value ? '' : 'none';
+      }
+      if (languageMatchAllBtn) languageMatchAllBtn.classList.toggle('active', languageMatchAll);
+      if (languageShowAllBtn) languageShowAllBtn.classList.toggle('active', languageShowingAll);
+      if (languageFilterBar) {
+        languageFilterBar.classList.toggle('visible', activeLanguages.size > 0);
+        if (languageFilterPills) {
+          languageFilterPills.innerHTML = '';
+          [...activeLanguages].sort().forEach(language => {
+            const pill = document.createElement('span');
+            pill.className = 'platform-filter-pill active';
+            pill.textContent = language;
+            pill.addEventListener('click', () => {
+              activeLanguages.delete(language);
+              syncLanguageUI();
+              scheduleRender();
+              if (languageShowingAll) renderAllLanguagePills();
+              else syncLanguageSearchResults();
+            });
+            languageFilterPills.appendChild(pill);
+          });
+        }
+      }
+      if (languageShowingAll) renderAllLanguagePills();
+      else syncLanguageSearchResults();
+    }
+
+    function makeLanguageButton(language, flexBasis, onAfterToggle) {
+      const count = languageCountMap.get(language) || 0;
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'platform-result-btn language-result-btn' + (activeLanguages.has(language) ? ' active' : '');
+      btn.style.flexBasis = flexBasis;
+      btn.dataset.language = language;
+      btn.dataset.pcount = count;
+      const check = document.createElement('span');
+      check.className = 'platform-result-check';
+      check.textContent = activeLanguages.has(language) ? '\u2713' : '\u25cb';
+      btn.appendChild(check);
+      btn.appendChild(document.createTextNode(language));
+      const countBadge = document.createElement('span');
+      countBadge.className = 'platform-result-count';
+      countBadge.textContent = count;
+      btn.appendChild(countBadge);
+      btn.addEventListener('click', () => {
+        if ((languageCountMap.get(language) || 0) === 0) return;
+        if (activeLanguages.has(language)) activeLanguages.delete(language);
+        else activeLanguages.add(language);
+        syncLanguageUI();
+        scheduleRender();
+        if (onAfterToggle) onAfterToggle();
+      });
+      return btn;
+    }
+
+    function renderLanguagePillGrid(labels, onAfterToggle) {
+      renderPillGridInto(languageSearchResults, labels, (language, flexBasis) =>
+        makeLanguageButton(language, flexBasis, onAfterToggle)
+      );
+    }
+
+    function syncLanguageSearchResults() {
+      if (languageShowingAll) {
+        renderAllLanguagePills();
+        return;
+      }
+      if (!languageSearchResults || !languageSearchInput) return;
+      const q = normalizeTitle(languageSearchInput.value.trim());
+      if (!q) {
+        languageSearchResults.classList.remove('visible');
+        languageSearchResults.innerHTML = '';
+        languageSearchResults.style.width = '';
+        return;
+      }
+      const matches = exportedLanguageLabels.filter(language => normalizeTitle(language).includes(q));
+      if (!matches.length) {
+        languageSearchResults.classList.remove('visible');
+        languageSearchResults.innerHTML = '';
+        languageSearchResults.style.width = '';
+        return;
+      }
+      languageSearchResults.classList.add('visible');
+      languageSearchResults.innerHTML = '';
+      renderLanguagePillGrid(matches, null);
+    }
+
+    function renderAllLanguagePills() {
+      if (!languageSearchResults) return;
+      if (!languageShowingAll) {
+        languageSearchResults.classList.remove('visible');
+        languageSearchResults.innerHTML = '';
+        languageSearchResults.style.width = '';
+        syncLanguageSearchResults();
+        return;
+      }
+      const q = normalizeTitle(languageSearchInput ? languageSearchInput.value.trim() : '');
+      const labels = exportedLanguageLabels.filter(language =>
+        (!q || normalizeTitle(language).includes(q)) && (languageCountMap.get(language) || 0) > 0
+      );
+      if (!labels.length) {
+        languageSearchResults.classList.remove('visible');
+        languageSearchResults.innerHTML = '';
+        languageSearchResults.style.width = '';
+        return;
+      }
+      languageSearchResults.classList.add('visible');
+      languageSearchResults.innerHTML = '';
+      renderLanguagePillGrid(labels, () => {
+        if (languageShowingAll) renderAllLanguagePills();
+      });
+    }
+
     // -- Build a genre tag element ---
     function syncStatusControls() {
       const activeStatus = playTypeFilter === null ? statusFilter : 'played';
@@ -11708,6 +17725,9 @@ ${statsHtml}
       if (platformSearchInput) platformSearchInput.value = '';
       if (platformSearchClear) platformSearchClear.style.display = 'none';
       syncPlatformSearchResults();
+      activeLanguages.clear();
+      if (languageSearchInput) languageSearchInput.value = '';
+      syncLanguageUI();
       clearDateFilter({ render: false });
       if (search) search.value = '';
       query = '';
@@ -11717,6 +17737,7 @@ ${statsHtml}
     function setPlayTypeFilter(pt, { toggle = false, clearOtherFilters = false } = {}) {
       if (clearOtherFilters) clearNonStatusFilters();
       aggregateSourceFilter = null;
+      igdbDefaultStatusFilter = null;
       playTypeFilter = toggle && playTypeFilter === pt ? null : pt;
       statusFilter = playTypeFilter === null ? 'all' : 'played';
       clearPlayedAndQueueHighlights();
@@ -11727,6 +17748,7 @@ ${statsHtml}
     function setStatusFilter(nextStatus, { toggle = false, resetTagsOnAll = false, clearOtherFilters = false } = {}) {
       if (clearOtherFilters) clearNonStatusFilters();
       aggregateSourceFilter = null;
+      igdbDefaultStatusFilter = null;
       statusFilter = toggle && statusFilter === nextStatus && playTypeFilter === null ? 'all' : nextStatus;
       if (statusFilter !== 'played') playTypeFilter = null;
       clearPlayedAndQueueHighlights();
@@ -11762,6 +17784,7 @@ ${statsHtml}
 
     function setAggregateSourceFilter(sourceIds) {
       if (!statusFilterCounterMode) clearNonStatusFilters();
+      igdbDefaultStatusFilter = null;
       aggregateSourceFilter = Array.isArray(sourceIds) && sourceIds.length ? sourceIds : null;
       statusFilter = 'all';
       playTypeFilter = null;
@@ -11780,6 +17803,18 @@ ${statsHtml}
     }
 
     function handleTableAction(target) {
+      const genreTextToggle = target.closest('.genre-text-toggle');
+      if (genreTextToggle) {
+        const list = genreTextToggle.closest('.genre-text-list');
+        if (!list) return true;
+        const genres = JSON.parse(list.dataset.genres || '[]');
+        const expanded = list.dataset.expanded !== '1';
+        list.dataset.expanded = expanded ? '1' : '0';
+        list.firstChild.textContent = (expanded ? genres : genres.slice(0, 5)).join(', ');
+        genreTextToggle.textContent = expanded ? 'Show less' : '+' + Math.max(0, genres.length - 5) + ' more';
+        genreTextToggle.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+        return true;
+      }
       const genreTag = target.closest('.genre-tag');
       if (genreTag) {
         setGenreFilter(genreTag.dataset.genre, !activeGenres.has(genreTag.dataset.genre));
@@ -11837,6 +17872,14 @@ ${statsHtml}
       return item.statusesList || item.statuses || [item.status];
     }
 
+    function itemMatchesIgdbDefaultStatus(item, status) {
+      const values = item.igdbStatusValues;
+      if (status === 'played') return values.some(value => value === 'played' || value === 'played-no status');
+      if (status === 'playing') return values.some(value => value === 'playing' || value === 'currently playing' || value === 'playing-no status');
+      if (status === 'backlog') return values.some(value => value === 'want to play' || value === 'want-to-play' || value === 'backlog' || value === 'want-no status');
+      return false;
+    }
+
     function configuredStatusPillById(id) {
       if (!STATUS_PILL_CONFIG || !Array.isArray(STATUS_PILL_CONFIG.categories)) return null;
       for (const category of STATUS_PILL_CONFIG.categories) {
@@ -11847,20 +17890,37 @@ ${statsHtml}
       return null;
     }
 
+    function configuredPillSources(pill) {
+      const collectionSources = (pill && Array.isArray(pill.collections) ? pill.collections : [])
+        .map(collection => String(collection && collection.url || '').match(/^backloggd-source:(.+)$/))
+        .filter(Boolean)
+        .map(match => {
+          const sourceId = match[1];
+          if (sourceId === 'played-sub') return { type: 'play_type', value: 'played' };
+          if (['completed', 'retired', 'shelved', 'abandoned'].includes(sourceId)) return { type: 'play_type', value: sourceId };
+          if (['played', 'playing', 'backlog', 'wishlist'].includes(sourceId)) return { type: 'status', value: sourceId };
+          return null;
+        })
+        .filter(Boolean);
+      return collectionSources.length ? collectionSources : (pill && pill.source ? [pill.source] : []);
+    }
+
     function itemMatchesConfiguredStatusPill(item, id) {
       const pill = configuredStatusPillById(id);
       if (!pill) return false;
       if (itemStatusIds(item).includes(id)) return true;
-      if (!pill.source) return false;
       const statuses = itemStatuses(item);
-      if (pill.source.type === 'play_type') {
-        return statuses.includes('played') && (item.play_type || null) === pill.source.value;
-      }
-      if (pill.source.type === 'status') return statuses.includes(pill.source.value);
-      return false;
+      return configuredPillSources(pill).some(source => {
+        if (source.type === 'play_type') {
+          return statuses.includes('played') && (item.play_type || null) === source.value;
+        }
+        if (source.type === 'status') return statuses.includes(source.value);
+        return false;
+      });
     }
 
     function matchesStatusFilter(item) {
+      if (igdbDefaultStatusFilter) return itemMatchesIgdbDefaultStatus(item, igdbDefaultStatusFilter);
       if (aggregateSourceFilter && aggregateSourceFilter.length) {
         return aggregateSourceFilter.some(id => itemMatchesConfiguredStatusPill(item, id));
       }
@@ -11876,61 +17936,64 @@ ${statsHtml}
     }
 
     function matchesSearchAndDate(item) {
-      if (query && !item.titleKey.includes(query)) return false;
+      if (query && !item.titleKey.includes(query) && !item.originalTitleKey.includes(query)) return false;
       return dateMatchesFilter(item.release_date, dateFilter);
     }
 
     function matchesPlatformFilter(item) {
       if (activePlatforms.size === 0) return true;
-      const itemPlatformSet = item.platformSet || new Set(item.platforms || []);
       if (platformMatchAll) {
         for (const p of activePlatforms) {
-          if (!itemPlatformSet.has(p)) return false;
+          if (!item.platformSet.has(p)) return false;
         }
         return true;
       }
       for (const p of activePlatforms) {
-        if (itemPlatformSet.has(p)) return true;
+        if (item.platformSet.has(p)) return true;
+      }
+      return false;
+    }
+
+    function matchesLanguageFilter(item) {
+      if (activeLanguages.size === 0) return true;
+      if (languageMatchAll) {
+        for (const language of activeLanguages) {
+          if (!item.languageSet.has(language)) return false;
+        }
+        return true;
+      }
+      for (const language of activeLanguages) {
+        if (item.languageSet.has(language)) return true;
       }
       return false;
     }
 
     function matchesGenreFilter(item) {
       if (activeGenres.size === 0) return true;
-      const itemGenreSlugs = item.genreSlugSet || new Set((item.genres || []).map(g => genreSlug(g)));
       if (matchAll) {
         for (const g of activeGenres) {
-          if (!itemGenreSlugs.has(g)) return false;
+          if (!item.genreSlugSet.has(g)) return false;
         }
         return true;
       }
       for (const g of activeGenres) {
-        if (itemGenreSlugs.has(g)) return true;
+        if (item.genreSlugSet.has(g)) return true;
       }
       return false;
     }
 
-    function matchesCoreFilters(item, { includeGenres = false, includePlatforms = true } = {}) {
+    function matchesCoreFilters(item, { includeGenres = false, includePlatforms = true, includeLanguages = true } = {}) {
       if (!matchesStatusFilter(item)) return false;
       if (!matchesPlayTypeFilter(item)) return false;
       if (!matchesSearchAndDate(item)) return false;
       if (includeGenres && !matchesGenreFilter(item)) return false;
       if (includePlatforms && !matchesPlatformFilter(item)) return false;
+      if (includeLanguages && !matchesLanguageFilter(item)) return false;
       return true;
     }
 
     function itemStatusIds(item) {
-      const sourceMeta = item.source_meta && typeof item.source_meta === 'object' ? item.source_meta : {};
-      const raw = Array.isArray(item.statusIds) && item.statusIds.length
-        ? item.statusIds
-        : Array.isArray(item.status_ids) && item.status_ids.length
-          ? item.status_ids
-          : Array.isArray(sourceMeta.status_ids) && sourceMeta.status_ids.length
-            ? sourceMeta.status_ids
-          : item.statusId || item.status_id
-            ? [item.statusId || item.status_id]
-            : [];
-      return [...new Set(raw.map(id => String(id || '').trim()).filter(Boolean))];
+      return item.statusIdList;
     }
 
     function countStatusIdsInPool(pool) {
@@ -11947,37 +18010,58 @@ ${statsHtml}
       const pill = configuredStatusPillById(id);
       if (!pill) return 0;
       if (statusIdCounts[id]) return statusIdCounts[id] || 0;
-      if (!pill.source) return 0;
-      if (pill.source.type === 'play_type') return playTypeCounts[pill.source.value] || 0;
-      if (pill.source.type === 'status') return statusCounts[pill.source.value] || 0;
-      return 0;
+      return configuredPillSources(pill).reduce((sum, source) => {
+        if (source.type === 'play_type') return sum + (playTypeCounts[source.value] || 0);
+        if (source.type === 'status') return sum + (statusCounts[source.value] || 0);
+        return sum;
+      }, 0);
     }
 
-    function updateConfiguredAggregateCounters(statusCounts, playTypeCounts, statusIdCounts = {}) {
+    function updateConfiguredAggregateCounters(pool) {
       document.querySelectorAll('[data-aggregate-sources]').forEach(btn => {
         const ids = String(btn.dataset.aggregateSources || '').split(',').filter(Boolean);
-        const total = ids.reduce((sum, id) => sum + countForConfiguredPillId(id, statusCounts, playTypeCounts, statusIdCounts), 0);
+        const total = pool.reduce((sum, item) => (
+          ids.some(id => itemMatchesConfiguredStatusPill(item, id)) ? sum + 1 : sum
+        ), 0);
         const totalEl = btn.querySelector('.sub-pill-total');
         if (totalEl) totalEl.textContent = total;
       });
     }
 
-    function updateConfiguredStatusCounters(statusIdCounts = {}) {
+    function updateConfiguredStatusCounters(statusCounts, playTypeCounts, statusIdCounts = {}) {
       document.querySelectorAll('[data-config-status-id]').forEach(btn => {
         const subNum = btn.querySelector('.sub-num');
-        if (subNum) subNum.textContent = statusIdCounts[btn.dataset.configStatusId] || 0;
+        if (subNum) {
+          subNum.textContent = countForConfiguredPillId(
+            btn.dataset.configStatusId,
+            statusCounts,
+            playTypeCounts,
+            statusIdCounts
+          );
+        }
+      });
+    }
+
+    function updateIgdbDefaultStatusCounters(pool) {
+      document.querySelectorAll('[data-igdb-default-status]').forEach(btn => {
+        const strong = btn.querySelector('strong');
+        if (strong) {
+          strong.textContent = pool.filter(item =>
+            itemMatchesIgdbDefaultStatus(item, btn.dataset.igdbDefaultStatus)
+          ).length;
+        }
       });
     }
 
     function applyMobyGamesCoverOrientation(coverEl, orientation) {
-      if (!IS_MOBYGAMES_VIEWER || !coverEl) return;
+      if (!USE_DEFAULT_LAYOUT || !coverEl) return;
       const normalized = String(orientation || '').toLowerCase();
       coverEl.classList.remove('cover-landscape', 'cover-portrait');
       coverEl.classList.add(normalized === 'landscape' ? 'cover-landscape' : 'cover-portrait');
     }
 
     function detectMobyGamesCoverOrientation(img, item, coverEl = img) {
-      if (!IS_MOBYGAMES_VIEWER || !img) return;
+      if (!USE_DEFAULT_LAYOUT || !img) return;
       applyMobyGamesCoverOrientation(coverEl, item.cover_orientation || item.coverOrientation || '');
       const classifyFromImage = () => {
         if (!img.naturalWidth || !img.naturalHeight) return;
@@ -12000,10 +18084,10 @@ ${statsHtml}
         titleTd.dataset.url = item.url;
         const game = document.createElement('div');
         game.className = 'game';
-        const coverEl = IS_MOBYGAMES_VIEWER ? document.createElement('span') : document.createElement('img');
-        coverEl.className = IS_MOBYGAMES_VIEWER ? 'cover moby-cover-frame' : 'cover';
+        const coverEl = USE_DEFAULT_LAYOUT ? document.createElement('span') : document.createElement('img');
+        coverEl.className = USE_DEFAULT_LAYOUT ? 'cover moby-cover-frame' : 'cover';
         let img = coverEl;
-        if (IS_MOBYGAMES_VIEWER) {
+        if (USE_DEFAULT_LAYOUT) {
           coverEl.style.backgroundImage = mobyGamesCoverBackgroundUrl(item.cover_url || '');
           img = document.createElement('img');
           img.className = 'moby-cover-probe';
@@ -12020,10 +18104,14 @@ ${statsHtml}
         const titleDiv = document.createElement('div');
         titleDiv.className = 'title';
         titleDiv.textContent = item.title;
+        const originalTitleDiv = document.createElement('div');
+        originalTitleDiv.className = 'original-title';
+        originalTitleDiv.textContent = item.originalTitle;
+        if (!item.originalTitle || item.originalTitleKey === item.titleKey) originalTitleDiv.hidden = true;
         const urlDiv = document.createElement('div');
         urlDiv.className = 'url';
         urlDiv.textContent = item.url.replace(/^https?:\\/\\/(?:www\\.)?backloggd\\.com/, 'backloggd.com');
-        text.append(titleDiv, urlDiv);
+        text.append(titleDiv, originalTitleDiv, urlDiv);
 
         if (payload.include_platforms && item.platforms && item.platforms.length) {
           const chips = document.createElement('div');
@@ -12044,11 +18132,33 @@ ${statsHtml}
         const genreTd = document.createElement('td');
         genreTd.className = 'genre-col';
         if (payload.include_genres && item.genres && item.genres.length) {
-          const wrap = document.createElement('div');
-          wrap.className = 'genre-tags';
-          item.genres.forEach(g => wrap.appendChild(makeTag(g)));
-          genreTd.appendChild(wrap);
+          if (IS_VNDB_VIEWER) {
+            const list = document.createElement('div');
+            list.className = 'genre-text-list';
+            list.dataset.genres = JSON.stringify(item.genres);
+            list.dataset.expanded = '0';
+            list.appendChild(document.createTextNode(item.genres.slice(0, 5).join(', ')));
+            if (item.genres.length > 5) {
+              const toggle = document.createElement('button');
+              toggle.className = 'genre-text-toggle';
+              toggle.type = 'button';
+              toggle.textContent = '+' + (item.genres.length - 5) + ' more';
+              toggle.setAttribute('aria-expanded', 'false');
+              toggle.setAttribute('aria-label', 'Show all ' + GENRE_LABEL_LOWER + ' for ' + item.title);
+              list.appendChild(toggle);
+            }
+            genreTd.appendChild(list);
+          } else {
+            const wrap = document.createElement('div');
+            wrap.className = 'genre-tags';
+            item.genres.forEach(g => wrap.appendChild(makeTag(g)));
+            genreTd.appendChild(wrap);
+          }
         }
+
+        const languageTd = document.createElement('td');
+        languageTd.className = 'language-col';
+        languageTd.textContent = (item.languages || []).join(', ') || '-';
 
         const statusTd = document.createElement('td');
         const sortedStatuses = [...itemStatuses(item)].sort(
@@ -12076,6 +18186,9 @@ ${statsHtml}
         });
 
         statusTd.appendChild(statusPillsWrap);
+        const lengthTd = document.createElement('td');
+        lengthTd.className = 'length-col';
+        lengthTd.textContent = item.length || '-';
         const ratingTd = document.createElement('td');
         ratingTd.className = 'rating-col num';
         ratingTd.textContent = item.average_rating == null ? '-' : Number(item.average_rating).toFixed(1);
@@ -12087,8 +18200,11 @@ ${statsHtml}
         releaseTd.textContent = item.release_date || '-';
 
         tr.append(titleTd);
+        if (VIEWER_OPTIONS.showLanguageColumn) tr.appendChild(languageTd);
         if (payload.include_genres) tr.appendChild(genreTd);
-        tr.append(statusTd, ratingTd);
+        tr.appendChild(statusTd);
+        if (VIEWER_OPTIONS.showLengthColumn) tr.appendChild(lengthTd);
+        tr.appendChild(ratingTd);
         tr.appendChild(userRatingTd);
         tr.appendChild(releaseTd);
         tr._bgdCoverImg = coverEl;
@@ -12136,8 +18252,29 @@ ${statsHtml}
       // Used to compute genre pill counts/visibility in OR (match-any) mode.
       // IMPORTANT: playTypeFilter (Played Sub Status) is now treated identically to statusFilter
       // for platform counter recalculation purposes - both are applied to all code paths.
-      const preGenreVisible = items.filter(item => matchesCoreFilters(item));
-      const visible = preGenreVisible.filter(matchesGenreFilter).sort(compare);
+      const preGenreVisible = [];
+      const visible = [];
+      const platformCountPool = [];
+      const languageCountPool = [];
+      const needsSeparatePlatformPool = platformShowingAll && !platformMatchAll;
+      for (const item of items) {
+        const matchesPreGenre = matchesCoreFilters(item);
+        if (matchesPreGenre) {
+          preGenreVisible.push(item);
+          if (matchesGenreFilter(item)) visible.push(item);
+        }
+        if (needsSeparatePlatformPool && matchesCoreFilters(item, { includeGenres: true, includePlatforms: false })) {
+          platformCountPool.push(item);
+        }
+        if (matchesCoreFilters(item, {
+          includeGenres: true,
+          includePlatforms: true,
+          includeLanguages: false,
+        })) {
+          languageCountPool.push(item);
+        }
+      }
+      visible.sort(compare);
       countLabel.textContent = visible.length + ' of ' + payload.total + ' games';
       empty.classList.toggle('visible', visible.length === 0);
       renderRows(visible);
@@ -12147,7 +18284,7 @@ ${statsHtml}
       // each pill shows how many of the current results share that genre.
       // In OR (match-any) mode the pool ignores the genre filter entirely, so
       // every genre with at least one game in the base-filtered set stays visible.
-      if (genreBarBtns.length || IS_MOBYGAMES_VIEWER) {
+      if (genreBarBtns.length || USE_SEARCH_GENRE_UI) {
         const genrePool = (!matchAll && activeGenres.size > 0) ? preGenreVisible : visible;
         const nextGenreCountMap = new Map();
         const genreSearch = genreSearchQuery();
@@ -12159,7 +18296,7 @@ ${statsHtml}
         }
         genreCountMap = nextGenreCountMap;
         let visibleSubPillCount = 0;
-        if (IS_MOBYGAMES_VIEWER) {
+        if (USE_SEARCH_GENRE_UI) {
           renderMobyGenreModePills();
           visibleSubPillCount = getMobyGenreModeLabels().length;
         } else {
@@ -12196,6 +18333,14 @@ ${statsHtml}
         }
         platformsDisplayedNum.textContent = visiblePlatformSet.size;
       }
+      if (gamesDisplayedLanguageNum) gamesDisplayedLanguageNum.textContent = visible.length;
+      if (languagesDisplayedNum) {
+        const visibleLanguageSet = new Set();
+        for (const item of visible) {
+          for (const language of (item.languages || [])) visibleLanguageSet.add(language);
+        }
+        languagesDisplayedNum.textContent = visibleLanguageSet.size;
+      }
       // Rebuild platformCountMap.
       // When "Show All" is active AND "Match Selected" is OFF, calculate platform counts
       // from items that pass all filters (status, play_type, date, search, genre) EXCEPT
@@ -12205,12 +18350,12 @@ ${statsHtml}
       // In all other cases (Match Selected ON, or Show All inactive) use the live
       // visible set so counters reflect what is currently filtered.
       platformCountMap.clear();
-      if (platformShowingAll && !platformMatchAll) {
+      if (needsSeparatePlatformPool) {
         // Calculate platform counts from items passing all filters except platform filters.
         // This preserves the "Show All" OR-mode behavior while responding to Genre/Status/PlayType changes.
           // Genre filter: include genre filtering in the count pool (same as Status and PlayType)
           // Do NOT filter by platform here - we're counting all platforms
-        items.filter(item => matchesCoreFilters(item, { includeGenres: true, includePlatforms: false })).forEach(item => {
+        platformCountPool.forEach(item => {
           (item.platforms || []).forEach(p => {
             platformCountMap.set(p, (platformCountMap.get(p) || 0) + 1);
           });
@@ -12227,24 +18372,22 @@ ${statsHtml}
       // Push counts into any currently-rendered platform pills
       updatePlatformPillCounts();
 
+      languageCountMap.clear();
+      languageCountPool.forEach(item => {
+        (item.languages || []).forEach(language => {
+          languageCountMap.set(language, (languageCountMap.get(language) || 0) + 1);
+        });
+      });
+      if (languageShowingAll) renderAllLanguagePills();
+      else if (languageSearchInput && languageSearchInput.value.trim()) syncLanguageSearchResults();
+
       // -- Status Filter Counter: update stat button numbers ---
       if (statusFilterCounterMode) {
-        // When Genre and/or Platform filters are active, recalculate Status and Sub Status
-        // counters from the subset of items that pass those filters - ignoring status,
-        // playType, search, and date filters so every status/sub-status button always
-        // remains visible and its count represents how many of its games survive the
-        // current Genre + Platform selection.
-        //
-        // When no Genre or Platform filters are active the filtered pool equals the full
-        // payload, so counts fall back to the original values automatically.
-        // Build the counting pool from non-status filters. Status/play-type
-        // filters are ignored so every status pill remains available as a
-        // counter for the current date/search/genre/platform selection.
-        const statusCountPool = items.filter(item =>
-          matchesSearchAndDate(item) &&
-          matchesGenreFilter(item) &&
-          matchesPlatformFilter(item)
-        );
+        // Count status membership across the games that are actually displayed.
+        // A visible multi-status game contributes to every status it carries, so
+        // selecting Playing can still show how many displayed games are also
+        // Backlog, Wishlist, or another configured status.
+        const statusCountPool = visible;
         // Derive per-status and per-play_type counts from the pool.
         // A game with multiple statuses is counted in each applicable bucket.
         const _statusCounts = {};
@@ -12288,8 +18431,9 @@ ${statsHtml}
           const subNum = btn.querySelector('.sub-num');
           if (subNum) subNum.textContent = _statusCounts[s] || 0;
         });
-        updateConfiguredStatusCounters(_statusIdCounts);
-        updateConfiguredAggregateCounters(_statusCounts, _ptCounts, _statusIdCounts);
+        updateConfiguredStatusCounters(_statusCounts, _ptCounts, _statusIdCounts);
+        updateConfiguredAggregateCounters(statusCountPool);
+        updateIgdbDefaultStatusCounters(statusCountPool);
       } else {
         // Status Filter Counter OFF: restore all counters to original payload values
         const totalBtn = document.querySelector('[data-status-filter="all"]');
@@ -12311,19 +18455,28 @@ ${statsHtml}
           if (subNum) subNum.textContent = payload.counts[s] || 0;
         });
         const originalStatusIdCounts = countStatusIdsInPool(items);
-        updateConfiguredStatusCounters(originalStatusIdCounts);
-        updateConfiguredAggregateCounters(payload.counts || {}, PLAY_TYPE_COUNTS_ORIG, originalStatusIdCounts);
+        updateConfiguredStatusCounters(payload.counts || {}, PLAY_TYPE_COUNTS_ORIG, originalStatusIdCounts);
+        updateConfiguredAggregateCounters(items);
+        updateIgdbDefaultStatusCounters(items);
       }
     }
 
     // -- Checkbox state: save + restore ---
     let renderRaf = 0;
+    let renderDebounceTimer = 0;
     function scheduleRender() {
       if (renderRaf) return;
       renderRaf = requestAnimationFrame(() => {
         renderRaf = 0;
         render();
       });
+    }
+    function scheduleDebouncedRender(delayMs = 120) {
+      if (renderDebounceTimer) clearTimeout(renderDebounceTimer);
+      renderDebounceTimer = setTimeout(() => {
+        renderDebounceTimer = 0;
+        scheduleRender();
+      }, delayMs);
     }
 
     function applyCheckbox(el, key, defaultOn, onFn) {
@@ -12338,20 +18491,24 @@ ${statsHtml}
       const titleTh = document.querySelector('th[data-sort="title"]');
       if (!titleTh) return;
       const visible = {
+        language: !document.body.classList.contains('hide-col-languages'),
         genre: payload.include_genres && !document.body.classList.contains('hide-col-genres'),
         status: !document.body.classList.contains('hide-col-status'),
+        length: !document.body.classList.contains('hide-col-length'),
         rating: !document.body.classList.contains('hide-col-avg-rating'),
         userRating: !document.body.classList.contains('hide-col-user-rating'),
         release: !document.body.classList.contains('hide-col-release-date'),
       };
       let fixed = 0;
-      for (const key of ['genre', 'status', 'rating', 'userRating', 'release']) {
+      for (const key of ['language', 'genre', 'status', 'length', 'rating', 'userRating', 'release']) {
         if (visible[key]) fixed += TABLE_WIDTHS[key] || 0;
       }
       titleTh.style.width = Math.max(0, 100 - fixed) + '%';
       const widthTargets = [
+        ['language', 'th.language-col'],
         ['genre', 'th.genre-col'],
         ['status', 'th[data-sort="status"]'],
+        ['length', 'th.length-col'],
         ['rating', 'th.rating-col'],
         ['userRating', 'th.user-rating-col'],
         ['release', 'th.release-col'],
@@ -12378,6 +18535,10 @@ ${statsHtml}
     }
 
     applyCheckbox(coversChk, 'bgdCovers', true, () => scheduleRender());
+    applyCheckbox(seriesDateOrderChk, 'bgdSeriesDateOrder', true, on => {
+      seriesDateOrder = on;
+      scheduleRender();
+    });
 
     // -- Columns picker ---
     (function initColPicker() {
@@ -12401,17 +18562,32 @@ ${statsHtml}
       // Each column checkbox: id -> { bodyClass, default }
       const cols = [
         { id: 'colLink',        cls: 'hide-col-link',         def: true },
+        { id: 'colOriginalTitle', cls: 'hide-original-title', def: VIEWER_OPTIONS.defaultOriginalTitle },
         { id: 'colPlatforms',   cls: 'hide-col-platforms',    def: true },
+        { id: 'colLanguages',   cls: 'hide-col-languages',    def: VIEWER_OPTIONS.defaultLanguageColumn },
         { id: 'colGenres',      cls: 'hide-col-genres',       def: true },
         { id: 'colStatus',      cls: 'hide-col-status',       def: true },
+        { id: 'colLength',      cls: 'hide-col-length',       def: VIEWER_OPTIONS.defaultLengthColumn },
         { id: 'colAvgRating',   cls: 'hide-col-avg-rating',   def: true },
-        { id: 'colUserRating',  cls: 'hide-col-user-rating',  def: !IS_HLTB_VIEWER },
+        {
+          id: 'colUserRating',
+          cls: 'hide-col-user-rating',
+          def: VIEWER_OPTIONS.defaultUserRatingColumn,
+          enabled: VIEWER_OPTIONS.showUserRatingColumn,
+        },
         { id: 'colReleaseDate', cls: 'hide-col-release-date', def: true },
       ];
 
-      cols.forEach(({ id, cls, def }) => {
+      cols.forEach(({ id, cls, def, enabled = true }) => {
         const el = document.getElementById(id);
         if (!el) return;
+        if (!enabled) {
+          el.checked = false;
+          el.disabled = true;
+          document.body.classList.add(cls);
+          lsSet('bgdCol_' + id, '0');
+          return;
+        }
         // Restore from localStorage
         const stored = lsGet('bgdCol_' + id, null);
         el.checked = stored !== null ? stored === '1' : def;
@@ -12424,7 +18600,7 @@ ${statsHtml}
       });
       updateTableColumnWidths();
     })();
-    if (IS_MOBYGAMES_VIEWER) {
+    if (!VIEWER_OPTIONS.allowGenreEmojis) {
       document.body.classList.remove('show-genre-emojis');
     } else {
       applyCheckbox(genreEmojisChk, 'bgdGenreEmojis', false, on => {
@@ -12435,9 +18611,11 @@ ${statsHtml}
     }
 
     // -- Restore sort ---
-    const savedSortKey = lsGet('bgdSortKey', 'title');
-    const savedSortDir = lsGet('bgdSortDir', 'asc');
-    sortKey = savedSortKey; sortDir = savedSortDir;
+    const savedSortKey = lsGet('bgdSortKeyV2', '');
+    const savedSortDir = lsGet('bgdSortDirV2', '');
+    const validSortKeys = new Set(thSorts.map(th => th.dataset.sort));
+    sortKey = validSortKeys.has(savedSortKey) ? savedSortKey : '';
+    sortDir = sortKey && (savedSortDir === 'asc' || savedSortDir === 'desc') ? savedSortDir : '';
     thSorts.forEach(th => {
       th.classList.remove('sort-asc', 'sort-desc');
       const arrow = th.querySelector('.sort-arrow');
@@ -12450,19 +18628,13 @@ ${statsHtml}
     });
 
     // -- Date filter events ---
-    function readBoundedNumber(input, min, max, requiredLength = null) {
-      if (!input || !input.value) return null;
-      const raw = input.value.trim();
-      if (requiredLength && raw.length < requiredLength) return null;
-      if (!/^\\d+$/.test(raw)) return null;
-      const value = Number(raw);
-      return value >= min && value <= max ? value : null;
-    }
-
     function readDateFilter() {
-      dateFilter.year  = readBoundedNumber(dfYear, 1970, 2099, 4);
-      dateFilter.month = readBoundedNumber(dfMonth, 1, 12);
-      dateFilter.day   = readBoundedNumber(dfDay, 1, 31);
+      const rawYear = dfYear ? dfYear.value.trim() : '';
+      const rawMonth = dfMonth ? dfMonth.value.trim() : '';
+      const rawDay = dfDay ? dfDay.value.trim() : '';
+      dateFilter.year = /^\\d{4}$/.test(rawYear) ? Number(rawYear) : null;
+      dateFilter.month = /^\\d{1,2}$/.test(rawMonth) ? Number(rawMonth) : null;
+      dateFilter.day = /^\\d{1,2}$/.test(rawDay) ? Number(rawDay) : null;
     }
 
     function clearDateFilter({ render = true } = {}) {
@@ -12473,9 +18645,9 @@ ${statsHtml}
       if (render) scheduleRender();
     }
 
-    if (dfYear)  dfYear.addEventListener('input',  () => { readDateFilter(); scheduleRender(); });
-    if (dfMonth) dfMonth.addEventListener('input', () => { readDateFilter(); scheduleRender(); });
-    if (dfDay)   dfDay.addEventListener('input',   () => { readDateFilter(); scheduleRender(); });
+    if (dfYear)  dfYear.addEventListener('input',  () => { readDateFilter(); scheduleDebouncedRender(); });
+    if (dfMonth) dfMonth.addEventListener('input', () => { readDateFilter(); scheduleDebouncedRender(); });
+    if (dfDay)   dfDay.addEventListener('input',   () => { readDateFilter(); scheduleDebouncedRender(); });
     if (dfClear) dfClear.addEventListener('click', () => clearDateFilter());
 
     // -- Match-all state ---
@@ -12492,7 +18664,7 @@ ${statsHtml}
 
     // -- Show All button ---
     if (genreShowAllBtn) genreShowAllBtn.addEventListener('click', () => {
-      if (!IS_MOBYGAMES_VIEWER) {
+      if (!USE_SEARCH_GENRE_UI) {
         clearGenres();
         return;
       }
@@ -12506,9 +18678,9 @@ ${statsHtml}
 
     // -- Genre Show Empty button ---
     if (genreShowEmptyBtn) {
-      if (IS_HLTB_VIEWER) genreShowEmptyBtn.hidden = true;
+      if (!VIEWER_OPTIONS.showEmptyGenres) genreShowEmptyBtn.hidden = true;
       genreShowEmptyBtn.addEventListener('click', () => {
-        if (IS_HLTB_VIEWER) return;
+        if (!VIEWER_OPTIONS.showEmptyGenres) return;
         genreShowingEmpty = !genreShowingEmpty;
         if (genreShowingEmpty) genreShowingAll = false;
         lsSet('bgdMobyGenreShowAll', genreShowingAll ? '1' : '0');
@@ -12557,6 +18729,47 @@ ${statsHtml}
         scheduleRender();
       });
     }
+
+    if (languageSearchInput) {
+      languageSearchInput.addEventListener('input', () => {
+        if (languageSearchClear) {
+          languageSearchClear.style.display = languageSearchInput.value ? '' : 'none';
+        }
+        syncLanguageSearchResults();
+      });
+    }
+    if (languageSearchClear) {
+      languageSearchClear.addEventListener('click', () => {
+        if (languageSearchInput) languageSearchInput.value = '';
+        languageSearchClear.style.display = 'none';
+        syncLanguageSearchResults();
+      });
+    }
+    if (languageShowAllBtn) {
+      languageShowAllBtn.addEventListener('click', () => {
+        languageShowingAll = !languageShowingAll;
+        lsSet('bgdLanguageShowAll', languageShowingAll ? '1' : '0');
+        syncLanguageUI();
+      });
+    }
+    if (languageMatchAllBtn) {
+      languageMatchAll = lsGet('bgdLanguageMatchAll', '0') === '1';
+      languageMatchAllBtn.addEventListener('click', () => {
+        languageMatchAll = !languageMatchAll;
+        languageMatchAllBtn.classList.toggle('active', languageMatchAll);
+        lsSet('bgdLanguageMatchAll', languageMatchAll ? '1' : '0');
+        scheduleRender();
+      });
+    }
+    if (languageFilterClear) {
+      languageFilterClear.addEventListener('click', () => {
+        activeLanguages.clear();
+        syncLanguageUI();
+        scheduleRender();
+      });
+    }
+    languageShowingAll = lsGet('bgdLanguageShowAll', '0') === '1';
+    syncLanguageUI();
 
     // -- Platform Show All button ---
 
@@ -12639,9 +18852,9 @@ ${statsHtml}
     }
 
     if (platformShowEmptyBtn) {
-      if (IS_HLTB_VIEWER) platformShowEmptyBtn.hidden = true;
+      if (!VIEWER_OPTIONS.showEmptyPlatforms) platformShowEmptyBtn.hidden = true;
       platformShowEmptyBtn.addEventListener('click', () => {
-        if (IS_HLTB_VIEWER) return;
+        if (!VIEWER_OPTIONS.showEmptyPlatforms) return;
         platformShowingEmpty = !platformShowingEmpty;
         if (platformShowingEmpty) {
           platformShowingAll = false;
@@ -12655,7 +18868,7 @@ ${statsHtml}
 
     // -- Filter visibility toggle (Genres / Platforms) ---
     // MobyGames Genre Show All persistence
-    if (IS_MOBYGAMES_VIEWER) {
+    if (USE_SEARCH_GENRE_UI) {
       const storedGSA = lsGet('bgdMobyGenreShowAll', null);
       if (storedGSA !== null) {
         genreShowingAll = storedGSA === '1';
@@ -12679,6 +18892,7 @@ ${statsHtml}
     (function initFilterVisToggles() {
       const genreSection = document.getElementById('genreBar');
       const platformSection = document.getElementById('platformSearchWrap');
+      const languageSection = document.getElementById('languageSearchWrap');
 
       function applyGenresVis(on) {
         if (genreSection) genreSection.style.display = on ? '' : 'none';
@@ -12690,12 +18904,19 @@ ${statsHtml}
         if (filtersPlatformsBtn) filtersPlatformsBtn.classList.toggle('active', on);
         lsSet('bgdFilterPlatformsVis', on ? '1' : '0');
       }
+      function applyLanguagesVis(on) {
+        if (languageSection) languageSection.style.display = on ? '' : 'none';
+        if (filtersLanguagesBtn) filtersLanguagesBtn.classList.toggle('active', on);
+        lsSet('bgdFilterLanguagesVis', on ? '1' : '0');
+      }
 
-      // Restore from localStorage (default: both on)
+      // Restore from localStorage (default: available filter panels on)
       const storedG = lsGet('bgdFilterGenresVis', '1');
       const storedP = lsGet('bgdFilterPlatformsVis', '1');
+      const storedL = lsGet('bgdFilterLanguagesVis', '1');
       applyGenresVis(storedG !== '0');
       applyPlatformsVis(storedP !== '0');
+      applyLanguagesVis(storedL !== '0');
 
       if (filtersGenresBtn) filtersGenresBtn.addEventListener('click', () => {
         const nowOn = !filtersGenresBtn.classList.contains('active');
@@ -12705,15 +18926,17 @@ ${statsHtml}
         const nowOn = !filtersPlatformsBtn.classList.contains('active');
         applyPlatformsVis(nowOn);
       });
+      if (filtersLanguagesBtn) filtersLanguagesBtn.addEventListener('click', () => {
+        const nowOn = !filtersLanguagesBtn.classList.contains('active');
+        applyLanguagesVis(nowOn);
+      });
 
       // Initialize Platforms Displayed total: always show the full scan size (50 or 226),
       // not the number of platform labels that actually appear in the exported data.
       if (platformsDisplayedTotal) {
-        platformsDisplayedTotal.textContent = IS_HLTB_VIEWER
-          ? exportedPlatformLabels.length
-          : IS_MOBYGAMES_VIEWER
+        platformsDisplayedTotal.textContent = USE_PROVIDED_PLATFORM_TOTAL
           ? ALL_KNOWN_PLATFORM_LABELS.length
-          : (payload.include_platforms226 ? ${ALL_PLATFORM_SLUGS.length} : ${PLATFORM_SLUGS.length});
+          : exportedPlatformLabels.length;
       }
     })();
 
@@ -12732,7 +18955,7 @@ ${statsHtml}
       search.addEventListener('input', () => {
         query = normalizeTitle(search.value.trim());
         searchClearBtn.classList.toggle('visible', search.value.length > 0);
-        scheduleRender();
+        scheduleDebouncedRender();
       });
       searchClearBtn.addEventListener('click', () => {
         search.value = '';
@@ -12758,15 +18981,25 @@ ${statsHtml}
     // -- Played sub-statuses toggle ---
     function applyPlaySubStatuses(on) {
       document.body.classList.toggle('show-play-types', on);
-      if (!on && playTypeFilter !== null) {
+      if (!on && (playTypeFilter !== null || aggregateSourceFilter !== null)) {
         setStatusFilter('all');
       }
+      if (on) {
+        igdbDefaultStatusFilter = null;
+        document.querySelectorAll('[data-igdb-default-status]').forEach(btn => btn.classList.remove('active'));
+      } else {
+        aggregateSourceFilter = null;
+        playTypeFilter = null;
+        document.querySelectorAll('[data-aggregate-sources],[data-config-status-id]').forEach(btn => btn.classList.remove('active'));
+      }
+      scheduleRender();
     }
     if (playSubStatusesChk) {
-      const storedPSS = lsGet('bgdPlaySubStatuses', null);
-      playSubStatusesChk.checked = storedPSS !== null ? storedPSS === '1' : true;
+      const forceConfiguredStatuses = payload.extract_target === 'lists' && payload.sourceWebsite === 'Backloggd';
+      const storedPSS = forceConfiguredStatuses ? '1' : lsGet('bgdPlaySubStatuses', null);
+      playSubStatusesChk.checked = forceConfiguredStatuses || (storedPSS !== null ? storedPSS === '1' : true);
       applyPlaySubStatuses(playSubStatusesChk.checked);
-      playSubStatusesChk.addEventListener('change', () => {
+      if (!forceConfiguredStatuses) playSubStatusesChk.addEventListener('change', () => {
         lsSet('bgdPlaySubStatuses', playSubStatusesChk.checked ? '1' : '0');
         applyPlaySubStatuses(playSubStatusesChk.checked);
       });
@@ -12812,6 +19045,23 @@ ${statsHtml}
       });
     });
 
+    document.querySelectorAll('[data-igdb-default-status]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        if (!statusFilterCounterMode) clearNonStatusFilters();
+        const next = btn.dataset.igdbDefaultStatus;
+        igdbDefaultStatusFilter = statusFilterCounterMode && igdbDefaultStatusFilter === next ? null : next;
+        statusFilter = 'all';
+        aggregateSourceFilter = null;
+        document.querySelectorAll('[data-igdb-default-status]').forEach(other => {
+          other.classList.toggle('active', igdbDefaultStatusFilter === other.dataset.igdbDefaultStatus);
+        });
+        statButtons.forEach(stat => {
+          stat.classList.toggle('active', !igdbDefaultStatusFilter && stat.dataset.statusFilter === 'all');
+        });
+        scheduleRender();
+      });
+    });
+
     // Status filter ---
     statButtons.forEach(btn => btn.addEventListener('click', () => {
       const nextStatus = btn.dataset.statusFilter;
@@ -12830,7 +19080,7 @@ ${statsHtml}
     // must be ignored - reacting to them creates a feedback loop that makes the
     // pills shake/flash continuously at intermediate window sizes.
     const genreGrid = document.getElementById('genreSinglePill');
-    if (!IS_MOBYGAMES_VIEWER && genreGrid && typeof ResizeObserver !== 'undefined') {
+    if (!USE_SEARCH_GENRE_UI && genreGrid && typeof ResizeObserver !== 'undefined') {
       let _roFrame = 0;
       let _roIdleTimer = null;
       let _lastGenreW = -1;
@@ -12917,29 +19167,32 @@ ${statsHtml}
 `;
   }
 
-  function buildViewerGenreBarHtml({ hasGenres, allGenres, allGenresSorted, genreCounts, isMobyGamesViewer, genreDisplayedTotal }) {
+  function buildViewerGenreBarHtml({ hasGenres, allGenres, allGenresSorted, genreCounts, viewerOptions, genreDisplayedTotal }) {
+    const usesSearchUi = viewerOptions.genreFilterUi === 'search';
+    const genreLabel = viewerOptions.genreLabel || 'Genres';
+    const genreLabelLower = genreLabel.toLocaleLowerCase();
     return hasGenres && allGenres.length ? `
       <div class="genre-bar" id="genreBar">
         <div class="genre-bar-controls">
-          ${isMobyGamesViewer ? `<div class="platform-search-input-wrap genre-search-input-wrap">
-            <input class="platform-search-input" id="genreSearchInput" type="text" placeholder="Search genre..." autocomplete="off">
+          ${viewerOptions.showGenreSearch ? `<div class="platform-search-input-wrap genre-search-input-wrap">
+            <input class="platform-search-input" id="genreSearchInput" type="text" placeholder="Search ${escapeHtml(genreLabelLower)}..." autocomplete="off">
             <button class="platform-search-clear" id="genreSearchClear" type="button">Clear</button>
-          </div>` : '<span class="genre-bar-label">Genres</span>'}
-          <button class="genre-show-all${isMobyGamesViewer ? ' platform-match-btn platform-show-all-btn' : ''}" type="button" id="genreShowAll"${isMobyGamesViewer ? ' title="Show all genre pills"' : ''}>${isMobyGamesViewer ? '<span class="filter-vis-dot"></span>' : ''}Show All</button>
-          ${isMobyGamesViewer ? '<button class="platform-match-btn platform-show-all-btn" type="button" id="genreShowEmpty" title="Show only genres with zero games"><span class="filter-vis-dot"></span>Empty Genres</button>' : ''}
-          <button class="genre-match-btn active" type="button" id="genreMatchAll" title="When on: games must match ALL selected genres. When off: any one genre is enough."><span class="filter-vis-dot"></span>Match Selected</button>
+          </div>` : `<span class="genre-bar-label">${escapeHtml(genreLabel)}</span>`}
+          <button class="genre-show-all${usesSearchUi ? ' platform-match-btn platform-show-all-btn' : ''}" type="button" id="genreShowAll"${usesSearchUi ? ` title="Show all ${escapeHtml(genreLabelLower)} pills"` : ''}>${usesSearchUi ? '<span class="filter-vis-dot"></span>' : ''}Show All</button>
+          ${viewerOptions.showEmptyGenres ? `<button class="genre-match-btn" type="button" id="genreShowEmpty" title="Show ${escapeHtml(genreLabelLower)} with no matching games"><span class="filter-vis-dot"></span>Empty ${escapeHtml(genreLabel)}</button>` : ''}
+          <button class="genre-match-btn active" type="button" id="genreMatchAll" title="When on: games must match ALL selected ${escapeHtml(genreLabelLower)}. When off: any one is enough."><span class="filter-vis-dot"></span>Match Selected</button>
           <span class="genre-spacer-pills" aria-hidden="true"></span>
           <span class="genre-counter-pill" id="gamesDisplayedPill" title="Games currently shown">
             <span class="genre-counter-pill-label">Games Displayed</span><span class="genre-counter-pill-num" id="gamesDisplayedNum">0</span>
           </span>
-          <span class="genre-counter-pill" id="genresDisplayedPill" title="Active genre filters">
-            <span class="genre-counter-pill-label">Genres Displayed</span><span class="genre-counter-pill-num" id="genresDisplayedNum">0</span><span class="genre-counter-pill-of">of</span><span class="genre-counter-pill-num">${genreDisplayedTotal}</span>
+          <span class="genre-counter-pill" id="genresDisplayedPill" title="Active ${escapeHtml(genreLabelLower)} filters">
+            <span class="genre-counter-pill-label">${escapeHtml(genreLabel)} Displayed</span><span class="genre-counter-pill-num" id="genresDisplayedNum">0</span><span class="genre-counter-pill-of">of</span><span class="genre-counter-pill-num">${genreDisplayedTotal}</span>
           </span>
           <span style="flex:1"></span>
         </div>
         <div class="genre-btn-wrap" id="genreBtnWrap">
-          <div class="${isMobyGamesViewer ? 'platform-search-results' : 'genre-pill-grid'}" id="genreSinglePill">
-            ${isMobyGamesViewer ? '' : allGenresSorted.map(g => {
+          <div class="${usesSearchUi ? 'platform-search-results' : 'genre-pill-grid'}" id="genreSinglePill">
+            ${usesSearchUi ? '' : allGenresSorted.map(g => {
               const safe = g.replace(/[^a-z0-9]/gi, '-').toLowerCase();
               const emoji = escapeHtml(GENRE_EMOJIS[g] || '');
               const count = genreCounts[g] || 0;
@@ -12947,9 +19200,9 @@ ${statsHtml}
             }).join('')}
           </div>
         </div>
-        ${isMobyGamesViewer ? `<div class="platform-filter-bar" id="genreFilterBar">
+        ${usesSearchUi ? `<div class="platform-filter-bar" id="genreFilterBar">
           <div class="platform-filter-bar-inner" id="genreFilterBarInner">
-            <span class="platform-filter-bar-label">Filtered by Genre</span>
+            <span class="platform-filter-bar-label">Filtered by ${escapeHtml(genreLabel)}</span>
             <span id="genreFilterPills"></span>
             <button class="platform-filter-clear" type="button" id="genreFilterClear">Clear filter</button>
           </div>
@@ -12957,8 +19210,8 @@ ${statsHtml}
       </div>` : ``;
   }
 
-  function buildViewerPlatformFilterHtml({ hasPlatforms }) {
-    return hasPlatforms ? `
+  function buildViewerPlatformFilterHtml({ hasPlatforms, viewerOptions }) {
+    return hasPlatforms && viewerOptions.showPlatformSearch ? `
       <div class="platform-search-wrap visible" id="platformSearchWrap">
         <div class="platform-search-controls">
           <div class="platform-search-input-wrap">
@@ -12966,7 +19219,7 @@ ${statsHtml}
             <button class="platform-search-clear" id="platformSearchClear" type="button">Clear</button>
           </div>
           <button class="platform-match-btn platform-show-all-btn" type="button" id="platformShowAll" title="Show all platform pills"><span class="filter-vis-dot"></span>Show All</button>
-          <button class="platform-match-btn platform-show-all-btn" type="button" id="platformShowEmpty" title="Show only platforms with zero games"><span class="filter-vis-dot"></span>Empty Platforms</button>
+          ${viewerOptions.showEmptyPlatforms ? '<button class="platform-match-btn" type="button" id="platformShowEmpty" title="Show platforms with no matching games"><span class="filter-vis-dot"></span>Empty Platforms</button>' : ''}
           <button class="platform-match-btn" type="button" id="platformMatchAll" title="When on: games must have ALL selected platforms. When off: any one platform is enough."><span class="filter-vis-dot"></span>Match Selected</button>
           <span class="genre-spacer-pills" aria-hidden="true"></span>
           <span class="genre-counter-pill" id="gamesDisplayedPlatformPill" title="Games currently shown">
@@ -12987,24 +19240,26 @@ ${statsHtml}
       </div>` : '';
   }
 
-  function buildViewerToolbarHtml({ hasGenres, hasPlatforms, isMobyGamesViewer }) {
+  function buildViewerToolbarHtml({ hasGenres, hasPlatforms, hasLanguages, viewerOptions }) {
+    const genreLabel = viewerOptions.genreLabel || 'Genres';
     return `<section class="toolbar">
-      <div class="toolbar-search">
+      ${viewerOptions.showNameSearch ? `<div class="toolbar-search">
         <input id="search" type="search" placeholder="Search by title...">
         <button class="search-clear-btn" id="searchClearBtn" type="button">Clear</button>
-      </div>
+      </div>` : ''}
       <div class="date-filter">
-        <input class="df-year"  type="number" id="dfYear"  placeholder="Year"  min="1970" max="2099">
+        <input class="df-year"  type="number" id="dfYear"  placeholder="Year">
         <span class="date-filter-sep">/</span>
-        <input class="df-month" type="number" id="dfMonth" placeholder="Mo"    min="1"    max="12">
+        <input class="df-month" type="number" id="dfMonth" placeholder="Mo">
         <span class="date-filter-sep">/</span>
-        <input class="df-day"   type="number" id="dfDay"   placeholder="Day"   min="1"    max="31">
+        <input class="df-day"   type="number" id="dfDay"   placeholder="Day">
         <button class="date-filter-clear" type="button" id="dfClear">Clear</button>
       </div>
-      ${hasGenres || hasPlatforms ? `<div class="filter-toggle-group">
+      ${hasGenres || hasPlatforms || hasLanguages ? `<div class="filter-toggle-group">
         <span class="filter-toggle-label">Filters:</span>
-        ${hasGenres ? '<button class="filter-vis-btn active" type="button" id="filtersGenresBtn"><span class="filter-vis-dot"></span>Genres</button>' : ''}
+        ${hasGenres ? `<button class="filter-vis-btn active" type="button" id="filtersGenresBtn"><span class="filter-vis-dot"></span>${escapeHtml(genreLabel)}</button>` : ''}
         ${hasPlatforms ? '<button class="filter-vis-btn active" type="button" id="filtersPlatformsBtn"><span class="filter-vis-dot"></span>Platforms</button>' : ''}
+        ${hasLanguages ? '<button class="filter-vis-btn active" type="button" id="filtersLanguagesBtn"><span class="filter-vis-dot"></span>Languages</button>' : ''}
       </div>` : ''}
       <div class="col-picker-wrap" id="colPickerWrap">
         <button class="col-picker-btn" type="button" id="colPickerBtn">Columns</button>
@@ -13014,9 +19269,10 @@ ${statsHtml}
             <label class="col-picker-chk"><input type="checkbox" id="covers" checked> Covers</label>
             <label class="col-picker-chk"><input type="checkbox" id="colLink" checked> Links</label>
           </div>
-          ${hasGenres ? `<div class="col-picker-row no-sep">
-            <label class="col-picker-chk"><input type="checkbox" id="colGenres" checked> Genres</label>
-            ${isMobyGamesViewer ? '' : '<label class="col-picker-chk"><input type="checkbox" id="genreEmojis"> Emoji</label>'}
+          ${(hasGenres || viewerOptions.showOriginalTitleOption) ? `<div class="col-picker-row no-sep">
+            ${viewerOptions.showOriginalTitleOption ? '<label class="col-picker-chk"><input type="checkbox" id="colOriginalTitle"> Original Title</label>' : ''}
+            ${hasGenres ? `<label class="col-picker-chk"><input type="checkbox" id="colGenres" checked> ${escapeHtml(genreLabel)}</label>` : ''}
+            ${hasGenres && viewerOptions.allowGenreEmojis ? '<label class="col-picker-chk"><input type="checkbox" id="genreEmojis"> Emoji</label>' : ''}
           </div>` : ''}
           ${hasPlatforms ? `<div class="col-picker-row no-sep">
             <label class="col-picker-chk"><input type="checkbox" id="colPlatforms" checked> Platforms</label>
@@ -13024,26 +19280,36 @@ ${statsHtml}
           </div>` : `<div class="col-picker-row no-sep">
             <label class="col-picker-chk"><input type="checkbox" id="colStatus" checked> Status</label>
           </div>`}
+          ${(viewerOptions.showLanguageColumn || viewerOptions.showLengthColumn) ? `<div class="col-picker-row no-sep">
+            ${viewerOptions.showLanguageColumn ? '<label class="col-picker-chk"><input type="checkbox" id="colLanguages"> Languages</label>' : ''}
+            ${viewerOptions.showLengthColumn ? '<label class="col-picker-chk"><input type="checkbox" id="colLength"> Length</label>' : ''}
+          </div>` : ''}
           <div class="col-picker-row">
             <label class="col-picker-chk"><input type="checkbox" id="colAvgRating" checked> Average Rating</label>
-            <label class="col-picker-chk"><input type="checkbox" id="colUserRating" checked> User Rating</label>
+            <label class="col-picker-chk"><input type="checkbox" id="colUserRating"${viewerOptions.showUserRatingColumn ? ' checked' : ' disabled'}> User Rating</label>
           </div>
           <div class="col-picker-row">
             <label class="col-picker-chk"><input type="checkbox" id="colReleaseDate" checked> Release Date</label>
+          </div>
+          <div class="col-picker-row no-sep">
+            <label class="col-picker-chk"><input type="checkbox" id="seriesDateOrder"> Series Date Order</label>
           </div>
         </div>
       </div>
     </section>`;
   }
 
-  function buildViewerTableHtml({ hasGenres }) {
+  function buildViewerTableHtml({ hasGenres, viewerOptions }) {
+    const genreLabel = viewerOptions.genreLabel || 'Genres';
     return `<section class="table-wrap" id="tableWrap" tabindex="0">
       <table>
         <thead>
           <tr>
             <th data-sort="title">Game <span class="sort-arrow">\u21c5</span></th>
-            ${hasGenres ? '<th class="genre-col">Genres</th>' : ''}
+            ${viewerOptions.showLanguageColumn ? '<th class="language-col">Languages</th>' : ''}
+            ${hasGenres ? `<th class="genre-col">${escapeHtml(genreLabel)}</th>` : ''}
             <th data-sort="status">Status <span class="sort-arrow">\u21c5</span></th>
+            ${viewerOptions.showLengthColumn ? '<th class="length-col" data-sort="length">Length <span class="sort-arrow">\u21c5</span></th>' : ''}
             <th class="rating-col" data-sort="average_rating"><span class="th-label">Average<br><span class="th-line">Rating <span class="sort-arrow">\u21c5</span></span></span></th>
             <th class="user-rating-col" data-sort="user_rating"><span class="th-label">User<br><span class="th-line">Rating <span class="sort-arrow">\u21c5</span></span></span></th>
             <th class="release-col" data-sort="release_date"><span class="th-label">Release<br><span class="th-line">Date <span class="sort-arrow">\u21c5</span></span></span></th>
@@ -13090,24 +19356,44 @@ ${viewerScript}  </script>
     const generated = escapeHtml(new Date(payload.generated_at).toLocaleString());
     const hasGenres = payload.include_genres;
     const hasPlatforms = payload.include_platforms;
+    const providedGenreList = Array.isArray(payload.mobygames_genre_labels) && payload.mobygames_genre_labels.length
+      || Array.isArray(payload.igdb_genre_labels) && payload.igdb_genre_labels.length;
+    const providedPlatformList = Array.isArray(payload.mobygames_platform_labels) && payload.mobygames_platform_labels.length
+      || Array.isArray(payload.gamefaqs_platform_labels) && payload.gamefaqs_platform_labels.length
+      || Array.isArray(payload.igdb_platform_labels) && payload.igdb_platform_labels.length;
+    const viewerOptions = {
+      ...getExportedHtmlTemplateOptions(payload.sourceWebsite),
+      ...(payload.extract_target === 'lists' ? {
+        showLengthColumn: true,
+        defaultLengthColumn: true,
+      } : {}),
+      ...(providedGenreList ? {
+        genreTotalSource: 'provided',
+        showEmptyGenres: true,
+      } : {}),
+      ...(providedPlatformList ? {
+        platformTotalSource: 'provided',
+        showEmptyPlatforms: true,
+      } : {}),
+    };
     const statusLabelsJson = escapeJsonForHtml(JSON.stringify({ ...STATUS_LABELS, ...(payload.status_labels || {}) }));
     const statusColorsJson = escapeJsonForHtml(JSON.stringify(payload.status_colors || {}));
     const playTypeLabelsJson = escapeJsonForHtml(JSON.stringify(PLAY_TYPE_LABELS));
     const playTypeColorsJson = escapeJsonForHtml(JSON.stringify(PLAY_TYPE_COLORS));
     const tableWidths = {
+      language: 11,
       genre: hasGenres ? 18 : 0,
       status: 10,
+      length: 7,
       rating: 8,
       userRating: 8,
       release: 9,
     };
-    tableWidths.title = 100 - tableWidths.genre - tableWidths.status - tableWidths.rating - tableWidths.userRating - tableWidths.release;
+    tableWidths.title = 100 - tableWidths.language - tableWidths.genre - tableWidths.status - tableWidths.length - tableWidths.rating - tableWidths.userRating - tableWidths.release;
 
     // Collect all genres present in the data. MobyGames exports use the exact
     // scraped genre/gameplay values; Backloggd keeps the established genre list.
-    const isHowLongToBeatViewer = isSourceWebsite(payload.sourceWebsite, 'howlongtobeat');
-    const isMobyGamesViewer = isSourceWebsite(payload.sourceWebsite, 'mobygames') || isHowLongToBeatViewer;
-    const allGenres = isMobyGamesViewer
+    const allGenres = viewerOptions.genreFilterUi === 'search'
       ? [...new Set(payload.items.flatMap(item => item.genres || []))]
       : GENRE_SLUGS.map(g => g.label).filter(label =>
         payload.items.some(item => (item.genres || []).includes(label))
@@ -13138,30 +19424,49 @@ ${viewerScript}  </script>
     ).length;
 
     // Sort genres alphabetically for grouping
-    const allGenresSorted = [...allGenres].sort((a, b) => a.localeCompare(b));
-    const genreDisplayedTotal = isMobyGamesViewer && !isHowLongToBeatViewer
-      ? new Set([...MOBYGAMES_GENRE_LABELS, ...allGenres]).size
+    const allGenresSorted = [...allGenres].sort(compareNatural);
+    const sourceDescriptor = getSourceDescriptorByWebsite(payload.sourceWebsite);
+    const providedGenreLabels = sourceDescriptor.id === 'mobygames'
+      ? [...MOBYGAMES_GENRE_LABELS, ...allGenres]
+      : sourceDescriptor.id === 'igdb'
+        ? IGDB_GENRE_LABELS
+      : sourceDescriptor.id === 'backloggd'
+        ? GENRE_SLUGS.map(genre => genre.label)
+        : allGenres;
+    const genreDisplayedTotal = viewerOptions.genreTotalSource === 'provided'
+      ? new Set(providedGenreLabels).size
       : allGenres.length;
+    const allLanguages = [...new Set(payload.items.flatMap(item => item.languages || []))]
+      .sort(compareNatural);
 
     const genreBarHtml = buildViewerGenreBarHtml({
       hasGenres,
       allGenres,
       allGenresSorted,
       genreCounts,
-      isMobyGamesViewer,
+      viewerOptions,
       genreDisplayedTotal,
     });
-    const platformFilterHtml = buildViewerPlatformFilterHtml({ hasPlatforms });
-    const toolbarHtml = buildViewerToolbarHtml({ hasGenres, hasPlatforms, isMobyGamesViewer });
-    const tableHtml = buildViewerTableHtml({ hasGenres });
+
+    const platformFilterHtml = buildViewerPlatformFilterHtml({ hasPlatforms, viewerOptions });
+    const languageFilterHtml = buildViewerLanguageFilterHtml({ languages: allLanguages, viewerOptions });
+    const toolbarHtml = buildViewerToolbarHtml({
+      hasGenres,
+      hasPlatforms,
+      hasLanguages: viewerOptions.showLanguageSearch && allLanguages.length > 0,
+      viewerOptions,
+    });
+    const tableHtml = buildViewerTableHtml({ hasGenres, viewerOptions });
     const heroHtml = buildViewerHeroHtml({
       payload,
       generated,
       genreBarHtml,
       platformFilterHtml,
+      languageFilterHtml,
       playTypeCounts,
       playedTotal,
       queueTotal,
+      viewerOptions,
     });
 
     const viewerCss = buildViewerCss({ genreColorCss, tableWidths });
@@ -13172,6 +19477,7 @@ ${viewerScript}  </script>
     });
     const viewerScript = buildViewerScript({
       payload,
+      viewerOptions,
       statusLabelsJson,
       statusColorsJson,
       playTypeLabelsJson,
@@ -13219,7 +19525,7 @@ ${viewerScript}  </script>
       if (includeGenres) item.genres = genresByUrl.get(row.url) || [];
       if (includePlatforms || includePlatforms226) item.platforms = platformsByUrl.get(row.url) || [];
       return item;
-    }).sort((a, b) => a._title_sort.localeCompare(b._title_sort)).map(item => {
+    }).sort((a, b) => compareNatural(a._title_sort, b._title_sort)).map(item => {
       delete item._title_sort;
       return item;
     });
@@ -13235,9 +19541,54 @@ ${viewerScript}  </script>
       include_genres: includeGenres,
       include_platforms: includePlatforms || includePlatforms226,
       include_platforms226: !!includePlatforms226,
-      status_pill_config: null,
+      status_pill_config: cloneStatusPillConfig(statusPillConfig),
       total: items.length,
       items,
+    };
+  }
+
+  function buildBackloggdListsPayload(items, targetSlug, collections, includeAdvanced) {
+    const config = cloneStatusPillConfig(statusPillConfig);
+    const statusMaps = buildCanonicalStatusMaps(config);
+    const counts = {};
+    items.forEach(item => {
+      statusList(item).forEach(status => {
+        counts[status] = (counts[status] || 0) + 1;
+      });
+    });
+    const normalizedItems = items
+      .map(item => ({
+        ...item,
+        average_rating: normalizeAverageRatingValue(item.average_rating),
+        user_rating: item.user_rating == null ? null : item.user_rating,
+        release_date: item.release_date || '',
+        length: item.length || '',
+        genres: item.genres || [],
+        platforms: item.platforms || [],
+        list: item.list || item.lists?.[0] || '',
+        list_url: item.list_url || item.list_urls?.[0] || '',
+        lists: item.lists || (item.list ? [item.list] : []),
+        list_urls: item.list_urls || (item.list_url ? [item.list_url] : []),
+      }))
+      .sort((a, b) => compareNatural(a.title, b.title));
+    return {
+      sourceWebsite: getSourceWebsite(DEFAULT_SOURCE_ID),
+      username: targetSlug,
+      source: `${location.origin}/u/${encodeURIComponent(targetSlug)}/lists/`,
+      extract_target: 'lists',
+      generated_at: new Date().toISOString(),
+      counts,
+      raw_counts: Object.fromEntries(collections.map(collection => [collection.name, collection.games])),
+      lists: collections,
+      include_genres: !!includeAdvanced,
+      include_platforms: !!includeAdvanced,
+      include_length: !!includeAdvanced,
+      status_pill_config: config,
+      status_labels: statusMaps.labels,
+      status_colors: statusMaps.colors,
+      status_priority: statusMaps.priority,
+      total: normalizedItems.length,
+      items: normalizedItems,
     };
   }
 
@@ -13245,29 +19596,182 @@ ${viewerScript}  </script>
   // 10. Export orchestration
   // ---------------------------------------------------------------------------
 
-  async function runExport({ includeGenres = false, includePlatforms = false, includePlatforms226 = false, includeOfflineCovers = false } = {}) {
-    beginExportSession();
-    const exportStartedAt = Date.now();
+  async function prepareBackloggdBasicScrape() {
+    const targetSlug = getExportUserSlug();
+    const scraped = await scrapeAllStatuses();
+    checkExportCancelled();
+    const deduped = dedupeRows(scraped.rows);
+    const dedupedCounts = Object.fromEntries(
+      STATUS_ORDER.map(status => [status, deduped.rows.filter(item => statusList(item).includes(status)).length])
+    );
+    const knownUrls = new Set(deduped.rows.map(row => row.url).filter(Boolean));
+    const releaseByUrl = new Map();
+    mergeReleaseDates(releaseByUrl, scraped.statusFallbackReleaseByUrl);
+    deduped.rows.forEach(row => mergeReleaseDate(releaseByUrl, row.url, row.release_date_from_card));
 
-    try {
-      const modeLabel = [
-        includeGenres ? 'genres' : '',
-        includeOfflineCovers ? 'offline covers' : '',
-        includePlatforms ? 'platforms (50)' : '',
-        includePlatforms226 ? 'platforms (226)' : '',
-      ].filter(Boolean).join(' + ');
+    let rowsNeedingListReleaseDates = countRowsNeedingListReleaseDates(deduped.rows, releaseByUrl);
+    const needsSubStatusFallback = deduped.rows.some(row =>
+      row.url && statusList(row).includes('played') && !row.data_status_title
+    );
+    if (needsSubStatusFallback) {
+      const fallback = await scrapePlayTypeFallback({
+        collectReleaseDates: rowsNeedingListReleaseDates > 0,
+        knownUrls,
+      });
+      checkExportCancelled();
+      deduped.rows.forEach(row => {
+        if (!row.data_status_title && row.url && fallback.playTypeByUrl.has(row.url)) {
+          row.data_status_title = fallback.playTypeByUrl.get(row.url);
+        }
+      });
+      mergeReleaseDates(releaseByUrl, fallback.releaseByUrl);
+      rowsNeedingListReleaseDates = countRowsNeedingListReleaseDates(deduped.rows, releaseByUrl);
+    }
+
+    const estimatedReleasePages = Math.max(1, Math.ceil(deduped.rows.length / 40));
+    await collectReleaseDatesIfNeeded('basic pass', deduped.rows, releaseByUrl, () =>
+      scrapeReleaseDates(estimatedReleasePages)
+    );
+    checkExportCancelled();
+    const detailReleaseData = await fetchMissingReleaseDates(deduped.rows, releaseByUrl);
+    checkExportCancelled();
+    return {
+      targetSlug,
+      rows: deduped.rows,
+      counts: scraped.counts,
+      dedupedCounts,
+      releaseByUrl,
+      detailReleaseData,
+      knownUrls,
+    };
+  }
+
+  async function runBackloggdStatusCountPreflight() {
+    if (exportInProgress) return;
+    return runExportSession(async () => {
+      setBackloggdPreflightWait(true);
+      backloggdBasicScrapeCache = await prepareBackloggdBasicScrape();
+      const playTypeCounts = Object.fromEntries(PLAY_TYPE_ORDER.map(type => [type, 0]));
+      backloggdBasicScrapeCache.rows.forEach(row => {
+        if (statusList(row).includes('played') && row.data_status_title in playTypeCounts) {
+          playTypeCounts[row.data_status_title] += 1;
+        }
+      });
+      backloggdStatusSourceCounts = {
+        played: backloggdBasicScrapeCache.dedupedCounts.played || 0,
+        playing: backloggdBasicScrapeCache.dedupedCounts.playing || 0,
+        backlog: backloggdBasicScrapeCache.dedupedCounts.backlog || 0,
+        wishlist: backloggdBasicScrapeCache.dedupedCounts.wishlist || 0,
+        completed: playTypeCounts.completed || 0,
+        retired: playTypeCounts.retired || 0,
+        shelved: playTypeCounts.shelved || 0,
+        abandoned: playTypeCounts.abandoned || 0,
+        'played-sub': playTypeCounts.played || 0,
+      };
+      syncConfiguredCollectionCounts(getBackloggdStatusSources());
+      setProgress(100);
+    }, {
+      onError: () => { backloggdBasicScrapeCache = null; },
+      onFinally: () => setBackloggdPreflightWait(false),
+    });
+  }
+
+  configureSourceDescriptor('backloggd', {
+    statusConfig: {
+      ...SOURCE_REGISTRY.backloggd.statusConfig,
+      prepareDefaultReset: () => preloadBackloggdStatusSourceCounts(),
+      syncDefaultCounts: collections => syncConfiguredCollectionCounts(collections),
+      loadAllCounts: runBackloggdStatusCountPreflight,
+    },
+  });
+
+  async function runBackloggdListsExport({ includeGenres = false, includeOfflineCovers = false } = {}) {
+    return runExportSession(async exportStartedAt => {
+      const includeAdvanced = !!includeGenres;
+      setActiveExportProgressPlan(makeBasicAdvancedProgressPlan(includeAdvanced));
       const targetSlug = getExportUserSlug();
-      addLog(`Starting export for ${targetSlug}${modeLabel ? ` [+ ${modeLabel}]` : ''}`);
+      addLog(`Starting Backloggd Lists export for ${targetSlug}`);
+      setProgressAtStageStart('basic', 1, 20);
+
+      const collections = await preloadBackloggdListCollections();
+      checkExportCancelled();
+      if (!collections.length) throw new Error('No Backloggd lists were found on the Lists page.');
+
+      let mappings = getBackloggdConfiguredListMappings(statusPillConfig, collections);
+      if (!mappings.length) {
+        statusPillConfig = normalizeStatusPillConfig(makeDefaultBackloggdListsStatusPillConfig(collections));
+        saveStatusPillConfig();
+        mappings = getBackloggdConfiguredListMappings(statusPillConfig, collections);
+      }
+      addLog(`Lists found: ${collections.length}; selected sources: ${mappings.length}`);
+
+      const rows = [];
+      for (let index = 0; index < mappings.length; index += 1) {
+        const listRows = await scrapeBackloggdList(mappings[index], index, mappings.length);
+        rows.push(...listRows);
+        setProgressInStage('basic', index + 1, mappings.length, 1, includeAdvanced ? 20 : 95);
+      }
+      removeLog('backloggd-list-progress');
+      const items = mergeBackloggdListRows(rows);
+      addLog(`Basic complete: ${rows.length} list entries, ${items.length} unique games`);
+      setProgressAtStageEnd('basic', 1, includeAdvanced ? 20 : 95);
+
+      if (includeAdvanced) {
+        setProgressAtStageStart('advanced', 20, 95);
+        const failures = await enrichBackloggdListItems(items);
+        if (failures.length) {
+          addLog(`Lists Advanced failed for ${failures.length} game page${failures.length === 1 ? '' : 's'}`, 'error');
+        }
+        setProgressAtStageEnd('advanced', 20, 95);
+      }
+
+      const payload = buildBackloggdListsPayload(items, targetSlug, collections, includeAdvanced);
+      const finalFormats = getSelectedFileFormats();
+      const formatDownload = prepareFormatsForDownload(finalFormats);
+      if (!formatDownload.canDownload) return;
+      await downloadBackloggdPayload(payload, finalFormats, targetSlug, { includeOfflineCovers });
+      setProgress(100);
+      addLog(`Finished: ${payload.items.length} games exported from ${mappings.length} lists`);
+      addLog(`Export took ${formatExportElapsedTime(exportStartedAt)}`);
+    });
+  }
+
+  async function runBackloggdGamesExport({ includeGenres = false, includePlatforms = false, includePlatforms226 = false, includeOfflineCovers = false } = {}) {
+    return runExportSession(async exportStartedAt => {
+      setActiveExportProgressPlan(makeBackloggdProgressPlan({
+        includeGenres,
+        includePlatforms,
+        includePlatforms226,
+      }));
+      const targetSlug = getExportUserSlug();
+      addLog(`Starting Backloggd export for ${targetSlug}`);
 
       // -- Single unified scrape pass for all four statuses ---
       // The combined rating endpoint returns played/playing/backlog/wishlist in
       // one page sequence, with per-game status flags and user ratings embedded.
-      const { rows, counts, statusFallbackApplied, statusFallbackReleaseByUrl } = await scrapeAllStatuses();
+      const cachedBasic = backloggdBasicScrapeCache && backloggdBasicScrapeCache.targetSlug === targetSlug
+        ? backloggdBasicScrapeCache
+        : null;
+      const {
+        rows,
+        counts,
+        statusFallbackApplied,
+        statusFallbackReleaseByUrl,
+      } = cachedBasic
+        ? {
+            rows: cachedBasic.rows,
+            counts: cachedBasic.counts,
+            statusFallbackApplied: false,
+            statusFallbackReleaseByUrl: cachedBasic.releaseByUrl,
+          }
+        : await scrapeAllStatuses();
       checkExportCancelled();
-      setProgress(38);
+      setProgressAtStageEnd('basicLibrary', 1, 20);
 
-      const deduped = dedupeRows(rows);
-      const dedupedCounts = Object.fromEntries(STATUS_ORDER.map(status => [status, deduped.rows.filter(item => statusList(item).includes(status)).length]));
+      const deduped = cachedBasic ? { rows: cachedBasic.rows } : dedupeRows(rows);
+      const dedupedCounts = cachedBasic
+        ? cachedBasic.dedupedCounts
+        : Object.fromEntries(STATUS_ORDER.map(status => [status, deduped.rows.filter(item => statusList(item).includes(status)).length]));
 
       addLog('Using average ratings already shown on library cards');
       addLog('Using user ratings already shown on library cards');
@@ -13277,8 +19781,8 @@ ${viewerScript}  </script>
       // Build a Set of all known game URLs for early-bail in genre/platform scraping.
       const knownUrls = new Set(deduped.rows.map(r => r.url).filter(Boolean));
 
-      let releaseByUrl = new Map();
-      mergeReleaseDates(releaseByUrl, statusFallbackReleaseByUrl);
+      let releaseByUrl = cachedBasic ? new Map(cachedBasic.releaseByUrl) : new Map();
+      if (!cachedBasic) mergeReleaseDates(releaseByUrl, statusFallbackReleaseByUrl);
       for (const row of deduped.rows) {
         mergeReleaseDate(releaseByUrl, row.url, row.release_date_from_card);
       }
@@ -13296,7 +19800,7 @@ ${viewerScript}  </script>
         !row.data_status_title
       );
 
-      if (needsSubStatusFallback) {
+      if (!cachedBasic && needsSubStatusFallback) {
         const playTypeFallback = await scrapePlayTypeFallback({
           collectReleaseDates: rowsNeedingListReleaseDates > 0,
           knownUrls,
@@ -13317,12 +19821,12 @@ ${viewerScript}  </script>
           addLog(`Release dates from sub-status fallback: ${added} added`);
           rowsNeedingListReleaseDates = countRowsNeedingListReleaseDates(deduped.rows, releaseByUrl);
         }
-      } else {
+      } else if (!cachedBasic) {
         addLog('Played sub-status fallback skipped: data-status-title already complete');
       }
 
       if (includeGenres) {
-        setProgress(42);
+        setProgressAtStageStart('genres', 20, 40);
         const collectGenreReleaseDates = rowsNeedingListReleaseDates > 0;
         const genreData = await scrapeGenresAndReleaseDates({
           collectReleaseDates: collectGenreReleaseDates,
@@ -13338,15 +19842,11 @@ ${viewerScript}  </script>
         } else {
           addLog('Release dates from genres pass skipped: already resolved');
         }
-        setProgress(65);
-      } else {
-        // No genres - perform the basic release-date pass (only when no platform
-        // tag was selected, since platforms will own the release dates instead).
-        setProgress(65);
+        setProgressAtStageEnd('genres', 20, 40);
       }
 
       if (includePlatforms226) {
-        setProgress(66);
+        setProgressAtStageStart('platforms', 40, 93);
         const platformData = await scrapePlatforms226({
           collectReleaseDates: rowsNeedingListReleaseDates > 0,
           knownUrls,
@@ -13359,9 +19859,9 @@ ${viewerScript}  </script>
           addLog(`Release dates from platforms (226) pass: ${added} added`);
           rowsNeedingListReleaseDates = countRowsNeedingListReleaseDates(deduped.rows, releaseByUrl);
         }
-        setProgress(82);
+        setProgressAtStageEnd('platforms', 40, 93);
       } else if (includePlatforms) {
-        setProgress(66);
+        setProgressAtStageStart('platforms', 40, 93);
         const platformData = await scrapePlatforms({
           collectReleaseDates: rowsNeedingListReleaseDates > 0,
           knownUrls,
@@ -13374,11 +19874,13 @@ ${viewerScript}  </script>
           addLog(`Release dates from platforms (50) pass: ${added} added`);
           rowsNeedingListReleaseDates = countRowsNeedingListReleaseDates(deduped.rows, releaseByUrl);
         }
-        setProgress(82);
+        setProgressAtStageEnd('platforms', 40, 93);
       }
 
       const enrichmentReleasePassRan = includeGenres || includePlatforms || includePlatforms226;
-      if (enrichmentReleasePassRan) {
+      if (cachedBasic) {
+        addLog('Using cached Backloggd Basic scrape');
+      } else if (enrichmentReleasePassRan) {
         addLog('Release dates from basic pass skipped: already covered by selected genre/platform pass');
       } else {
         await collectReleaseDatesIfNeeded('basic pass', deduped.rows, releaseByUrl, () =>
@@ -13387,14 +19889,16 @@ ${viewerScript}  </script>
         checkExportCancelled();
       }
 
-      const detailReleaseData = await fetchMissingReleaseDates(deduped.rows, releaseByUrl);
+      const detailReleaseData = cachedBasic
+        ? cachedBasic.detailReleaseData
+        : await fetchMissingReleaseDates(deduped.rows, releaseByUrl);
       checkExportCancelled();
       const totalResolved = deduped.rows.filter(row => {
         const d = detailReleaseData.detailReleaseByUrl.get(row.url) || releaseByUrl.get(row.url) || '';
         return !!d;
       }).length;
       addLog(`Release dates resolved: ${totalResolved} of ${deduped.rows.length} games (${detailReleaseData.detailReleaseByUrl.size} from detail fallback)`);
-      setProgress(88);
+      setProgressAtStageEnd('details', 93, 95);
 
       const payload = buildBackloggdPayloadFromRows({
         rows: deduped.rows,
@@ -13420,27 +19924,23 @@ ${viewerScript}  </script>
       }
 
       await downloadBackloggdPayload(payload, finalFormats, targetSlug, { includeOfflineCovers });
+      if (cachedBasic) backloggdBasicScrapeCache = null;
       setProgress(100);
       addLog(`Finished: ${payload.items.length} games exported`);
       addLog(`Export took ${formatExportElapsedTime(exportStartedAt)}`);
-    } catch (error) {
-      if (isExportCancelledError(error)) {
-        if (!exportStopMessageShown) showExportStoppedMessage();
-      } else {
-        console.error(error);
-        addLog(error && error.message ? error.message : String(error), 'error');
-      }
-      setProgress(100);
-    } finally {
-      finishExportSession();
-    }
+    });
+  }
+
+  async function runExport(options = {}) {
+    return getBackloggdTargetAdapter().id === 'lists'
+      ? runBackloggdListsExport(options)
+      : runBackloggdGamesExport(options);
   }
 
   async function runMobyGamesExport({ includeEnhancedMetadata = false, includeOfflineCovers = false } = {}) {
-    beginExportSession();
-    const exportStartedAt = Date.now();
-
-    try {
+    return runExportSession(async exportStartedAt => {
+      storageRemove(MOBYGAMES_EXPORT_CANCEL_KEY);
+      setActiveExportProgressPlan(makeBasicAdvancedProgressPlan(includeEnhancedMetadata));
       const collectionUrl = getMobyGamesCollectionRootUrl(location.href);
       if (collectionUrl && !isMobyGamesCollectionRootPage(location.href)) {
         savePendingNavMessage('Navigated to the correct page. Continue with configurations or exporting.');
@@ -13451,17 +19951,10 @@ ${viewerScript}  </script>
       const targetDisplayName = getMobyGamesDisplayNameFromDocument() || targetSlug;
       const configAtExport = normalizeStatusPillConfig(cloneStatusPillConfig(statusPillConfig));
       const selectedMappings = getMobyGamesConfiguredCollectionMappings(configAtExport);
-      const modeLabel = [
-        includeEnhancedMetadata ? '+genres, full release dates, all platforms' : '',
-        includeOfflineCovers ? 'offline covers' : '',
-      ].filter(Boolean).join(' + ');
-      const modeSuffix = modeLabel
-        ? (modeLabel.startsWith('+') ? ` [${modeLabel}]` : ` [+ ${modeLabel}]`)
-        : '';
-      addLog(`Starting MobyGames export for ${targetSlug}${modeSuffix}`);
+      addLog(`Starting MobyGames export for ${targetSlug}`);
       if (!selectedMappings.length) {
         addLog('No MobyGames collections are assigned in the status pill configuration.', 'error');
-        alert(`Please assign at least one ${getSourceWebsite('mobygames')} source to a status pill in the Configuration menu before exporting.`);
+        window.alert(`Please assign at least one ${getSourceWebsite('mobygames')} source to a status pill in the Configuration menu before exporting.`);
         setProgress(100);
         return;
       }
@@ -13469,7 +19962,7 @@ ${viewerScript}  </script>
       selectedMappings.forEach(mapping => {
         addLog(`Selected: ${mapping.collection.name} -> ${mapping.status}`);
       });
-      setProgress(15);
+      setProgressAtStageStart('basic', 1, 20);
       const state = {
         active: true,
         phase: 'scrape',
@@ -13494,18 +19987,9 @@ ${viewerScript}  </script>
       saveMobyGamesExportState(state);
       addLog(`Opening ${selectedMappings[0].collection.name} collection page...`);
       location.href = selectedMappings[0].collection.url;
-    } catch (error) {
-      if (isExportCancelledError(error)) {
-        if (!exportStopMessageShown) showExportStoppedMessage();
-      } else {
-        console.error(error);
-        addLog(error && error.message ? error.message : String(error), 'error');
-      }
-      setProgress(100);
-    } finally {
-      if (loadMobyGamesExportState()) return;
-      finishExportSession();
-    }
+    }, {
+      shouldFinish: () => !loadMobyGamesExportState(),
+    });
   }
 
   function buildHowLongToBeatCachedExportState(configAtExport, selectedMappings, { includeEnhancedMetadata = false, includeOfflineCovers = false, startedAt = Date.now() } = {}) {
@@ -13517,10 +20001,13 @@ ${viewerScript}  </script>
       mappingsByUrl.set(mapping.collection.url, list);
     });
     const items = [];
+    const categoryCountByKey = new Map();
     (hltbPreflightData.items || []).forEach(item => {
       const mappings = mappingsByUrl.get(item.category_url || item.collection_url || '');
       if (!mappings || !mappings.length) return;
       mappings.forEach(mapping => {
+        const categoryCountKey = `${mapping.collection.url}\u0000${mapping.statusId}`;
+        categoryCountByKey.set(categoryCountKey, (categoryCountByKey.get(categoryCountKey) || 0) + 1);
         items.push({
           ...item,
           category: mapping.collection.name,
@@ -13540,7 +20027,7 @@ ${viewerScript}  </script>
     const categoryCounts = selectedMappings.map(mapping => ({
       category: mapping.collection.name,
       status: mapping.status,
-      count: items.filter(item => item.category_url === mapping.collection.url && item.statusId === mapping.statusId).length,
+      count: categoryCountByKey.get(`${mapping.collection.url}\u0000${mapping.statusId}`) || 0,
     }));
     return {
       active: true,
@@ -13569,12 +20056,11 @@ ${viewerScript}  </script>
   }
 
   async function runHowLongToBeatExport({ includeEnhancedMetadata = false, includeOfflineCovers = false } = {}) {
-    beginExportSession();
-    const exportStartedAt = Date.now();
-
-    try {
+    return runExportSession(async exportStartedAt => {
+      storageRemove(HLTB_EXPORT_CANCEL_KEY);
+      setActiveExportProgressPlan(makeBasicAdvancedProgressPlan(includeEnhancedMetadata));
       const gamesRootUrl = getHowLongToBeatUserGamesRootUrl(location.href);
-      if (gamesRootUrl && !isHowLongToBeatUserGamesRootPage(location.href)) {
+      if (!isHowLongToBeatCollectionsTarget() && gamesRootUrl && !isHowLongToBeatUserGamesRootPage(location.href)) {
         savePendingNavMessage('Navigated to the correct page. Continue with configurations or exporting.');
         location.href = gamesRootUrl;
         return;
@@ -13582,17 +20068,10 @@ ${viewerScript}  </script>
       const targetSlug = getExportUserSlug();
       const configAtExport = normalizeStatusPillConfig(cloneStatusPillConfig(statusPillConfig));
       const selectedMappings = getHowLongToBeatConfiguredCategoryMappings(configAtExport);
-      const modeLabel = [
-        includeEnhancedMetadata ? '+metadata' : '',
-        includeOfflineCovers ? 'offline covers' : '',
-      ].filter(Boolean).join(' + ');
-      const modeSuffix = modeLabel
-        ? (modeLabel.startsWith('+') ? ` [${modeLabel}]` : ` [+ ${modeLabel}]`)
-        : '';
-      addLog(`Starting HowLongToBeat export for ${targetSlug}${modeSuffix}`);
+      addLog(`Starting HowLongToBeat export for ${targetSlug}`);
       if (!selectedMappings.length) {
         addLog('No HowLongToBeat categories are assigned in the status pill configuration.', 'error');
-        alert(`Please assign at least one ${getSourceWebsite('howlongtobeat')} source to a status pill in the Configuration menu before exporting.`);
+        window.alert(`Please assign at least one ${getSourceWebsite('howlongtobeat')} source to a status pill in the Configuration menu before exporting.`);
         setProgress(100);
         return;
       }
@@ -13600,7 +20079,7 @@ ${viewerScript}  </script>
       selectedMappings.forEach(mapping => {
         addLog(`Selected: ${mapping.collection.name} -> ${mapping.status}`);
       });
-      setProgress(15);
+      setProgressAtStageStart('basic', 1, 20);
       const cachedState = buildHowLongToBeatCachedExportState(configAtExport, selectedMappings, {
         includeEnhancedMetadata,
         includeOfflineCovers,
@@ -13637,19 +20116,354 @@ ${viewerScript}  </script>
       };
       saveHowLongToBeatExportState(state);
       addLog(`Opening ${selectedMappings[0].collection.name} category page...`);
-      location.href = getHowLongToBeatPageUrl(selectedMappings[0].collection.url, 1);
-    } catch (error) {
-      if (isExportCancelledError(error)) {
-        if (!exportStopMessageShown) showExportStoppedMessage();
-      } else {
-        console.error(error);
-        addLog(error && error.message ? error.message : String(error), 'error');
+      location.href = isHowLongToBeatCollectionsTarget(selectedMappings[0].collection.url)
+        ? selectedMappings[0].collection.url
+        : getHowLongToBeatPageUrl(selectedMappings[0].collection.url, 1);
+    }, {
+      shouldFinish: () => !loadHowLongToBeatExportState(),
+    });
+  }
+
+  function buildViewerLanguageFilterHtml({ languages, viewerOptions }) {
+    if (!viewerOptions.showLanguageSearch || !languages.length) return '';
+    return `
+      <div class="platform-search-wrap visible" id="languageSearchWrap">
+        <div class="platform-search-controls">
+          <div class="platform-search-input-wrap">
+            <input class="platform-search-input" id="languageSearchInput" type="text" placeholder="Search language..." autocomplete="off">
+            <button class="platform-search-clear" id="languageSearchClear" type="button">Clear</button>
+          </div>
+          <button class="platform-match-btn platform-show-all-btn" type="button" id="languageShowAll" title="Show all language pills"><span class="filter-vis-dot"></span>Show All</button>
+          <button class="platform-match-btn" type="button" id="languageMatchAll" title="When on: games must have ALL selected languages. When off: any one language is enough."><span class="filter-vis-dot"></span>Match Selected</button>
+          <span class="genre-spacer-pills" aria-hidden="true"></span>
+          <span class="genre-counter-pill" title="Games currently shown">
+            <span class="genre-counter-pill-label">Games Displayed</span><span class="genre-counter-pill-num" id="gamesDisplayedLanguageNum">0</span>
+          </span>
+          <span class="genre-counter-pill" title="Language filters shown">
+            <span class="genre-counter-pill-label">Languages Displayed</span><span class="genre-counter-pill-num" id="languagesDisplayedNum">0</span><span class="genre-counter-pill-of">of</span><span class="genre-counter-pill-num" id="languagesDisplayedTotal">${languages.length}</span>
+          </span>
+        </div>
+        <div class="platform-search-results" id="languageSearchResults"></div>
+        <div class="platform-filter-bar" id="languageFilterBar">
+          <div class="platform-filter-bar-inner">
+            <span class="platform-filter-bar-label">Filtered by language:</span>
+            <span id="languageFilterPills"></span>
+            <button class="platform-filter-clear" type="button" id="languageFilterClear">Clear filter</button>
+          </div>
+        </div>
+      </div>`;
+  }
+
+  function getVndbPageUrl(page) {
+    const userId = getExportUserSlug();
+    const url = new URL(`/${userId}/ulist`, location.origin);
+    url.searchParams.set('q', '');
+    url.searchParams.set('ch', '');
+    url.searchParams.set('f', '');
+    ['1', '2', '3', '4', '5', '6', '7', '0', '10', '12', '11'].forEach(labelId => {
+      url.searchParams.append('l', labelId);
+    });
+    url.searchParams.set('p', String(page));
+    url.searchParams.set('s', '1cadN');
+    return url.href;
+  }
+
+  async function runGameFaqsExport({ includeEnhancedMetadata = false, includeOfflineCovers = false } = {}) {
+    return runExportSession(async exportStartedAt => {
+      setActiveExportProgressPlan(makeBasicAdvancedProgressPlan(includeEnhancedMetadata));
+      const requiredPageUrl = redirectToGameFaqsCollectionIfNeeded();
+      if (requiredPageUrl && navigateToCorrectSourcePage(requiredPageUrl)) return;
+      const target = getGameFaqsTarget();
+      const configAtExport = normalizeStatusPillConfig(cloneStatusPillConfig(statusPillConfig));
+      const mappings = getGameFaqsConfiguredListMappings(configAtExport).filter(mapping => mapping.target === target);
+      if (!mappings.length) {
+        throw new Error('Assign at least one GameFAQs list to a status pill in the Configuration menu before exporting.');
       }
+      const username = getGameFaqsUsername(document) || getExportUserSlug();
+      if (!username) throw new Error('Could not find the logged-in GameFAQs username on the collection page.');
+      const allItems = [];
+      addLog(`Starting GameFAQs export for ${username}`);
+
+      for (let mappingIndex = 0; mappingIndex < mappings.length; mappingIndex += 1) {
+        const mapping = mappings[mappingIndex];
+        const itemsByProductId = new Map();
+        const pagination = await paginatePages({
+          startPage: 0,
+          maxPage: 999,
+          loadPage: async page => {
+            const pageUrl = target === 'lists'
+              ? getGameFaqsCustomListPageUrl(mapping.collection.url, page)
+              : getGameFaqsAjaxListUrl(mapping.listId, page);
+            addLog(`Loading ${mapping.collection.name} page ${page + 1}...`, 'info', 'gamefaqs-page-progress');
+            const html = await fetchHtml(pageUrl, { maxAttempts: 3, timeoutMs: 30000 });
+            const doc = new DOMParser().parseFromString(html, 'text/html');
+            return parseGameFaqsListDocument(doc, pageUrl, mapping);
+          },
+          getItems: parsed => parsed.games,
+          getSignature: parsed => parsed.signature,
+          onPage: (parsed, page) => {
+            parsed.games.forEach(game => itemsByProductId.set(game.product_id, game));
+            addLog(`${mapping.collection.name} page ${page + 1}: ${parsed.games.length} games`, 'info', 'gamefaqs-page-progress');
+            const completedLists = mappingIndex + Math.min(1, (page + 1) / Math.max(1, parsed.totalPages || page + 2));
+            setProgressInStage('basic', completedLists, mappings.length, 1, 20);
+          },
+          shouldStop: (parsed, page) =>
+            (parsed.totalPages && page + 1 >= parsed.totalPages)
+            || (parsed.count != null && itemsByProductId.size >= parsed.count),
+        });
+        if (pagination.stopReason === 'empty') {
+          addLog(`${mapping.collection.name} page ${pagination.lastPage + 1} is empty; pagination complete`);
+        } else if (pagination.stopReason === 'repeated' || pagination.stopReason === 'missing-signature') {
+          addLog(`${mapping.collection.name} page ${pagination.lastPage + 1} repeated an earlier page; pagination complete`);
+        }
+        const listItems = [...itemsByProductId.values()];
+        allItems.push(...listItems);
+        addLog(`${mapping.collection.name}: ${listItems.length} unique games`);
+      }
+      removeLog('gamefaqs-page-progress');
+      setProgressAtStageEnd('basic', 1, 20);
+
+      const mergedItems = mergeGameFaqsItemsForExport(allItems)
+        .sort((a, b) => compareNatural(a.title, b.title));
+      if (includeEnhancedMetadata) {
+        await enrichGameFaqsItemsFromGamePages(mergedItems);
+      }
+      const payload = buildGameFaqsPayload(
+        mergedItems,
+        username,
+        configAtExport,
+        mappings,
+        target,
+        includeEnhancedMetadata
+      );
+      const formats = getSelectedFileFormats();
+      const prepared = prepareFormatsForDownload(formats);
+      if (!prepared.canDownload) return;
+      const htmlPayload = formats.html
+        ? await prepareHtmlPayloadWithOfflineCovers('gamefaqs', payload, includeOfflineCovers)
+        : payload;
+      downloadPayloadFiles({
+        source: 'gamefaqs',
+        payload,
+        htmlPayload,
+        formats,
+        baseName: libraryBaseName('gamefaqs', username),
+      });
       setProgress(100);
-    } finally {
-      if (loadHowLongToBeatExportState()) return;
-      finishExportSession();
-    }
+      addLog(`Finished: ${payload.items.length} unique GameFAQs games exported`);
+      addLog(`Export took ${formatExportElapsedTime(exportStartedAt)}`);
+    });
+  }
+
+  async function runVndbExport({ includeGenres = false, includeOfflineCovers = false } = {}) {
+    return runExportSession(async exportStartedAt => {
+      setActiveExportProgressPlan(makeBasicAdvancedProgressPlan(includeGenres));
+      const configAtExport = normalizeStatusPillConfig(cloneStatusPillConfig(statusPillConfig));
+      let first = parseVndbListDocument(document, location.href, configAtExport);
+      const firstPageUrl = getVndbPageUrl(1);
+      try {
+        addLog('Loading the complete VNDB page 1 view in the background...');
+        const firstHtml = await fetchHtml(firstPageUrl, { maxAttempts: 3, timeoutMs: 30000 });
+        const firstDoc = new DOMParser().parseFromString(firstHtml, 'text/html');
+        const backgroundFirst = parseVndbListDocument(firstDoc, firstPageUrl, configAtExport);
+        if (backgroundFirst.cardCount) first = backgroundFirst;
+      } catch (error) {
+        addLog('Background page 1 load failed; using the currently displayed VNDB page.', 'error');
+      }
+      const username = first.username || getExportUserSlug();
+      const itemsById = new Map(first.items.map(item => [item.vn_id || item.url, item]));
+      const firstPageSignature = first.cardIds.join('|');
+      addLog(`Starting VNDB export for ${username}`);
+      addLog(`Page 1: ${first.items.length} visual novels`);
+      setProgressAtStageStart('basic', 1, 20);
+
+      const pagination = await paginatePages({
+        startPage: 2,
+        maxPage: 1000,
+        initialSignatures: [firstPageSignature],
+        loadPage: async page => {
+          const pageUrl = getVndbPageUrl(page);
+          addLog(`Loading VNDB page ${page} in the background...`, 'info', 'vndb-page-progress');
+          const html = await fetchHtml(pageUrl, { maxAttempts: 3, timeoutMs: 30000 });
+          const doc = new DOMParser().parseFromString(html, 'text/html');
+          return parseVndbListDocument(doc, pageUrl, configAtExport);
+        },
+        getItems: parsed => parsed.cardCount ? parsed.items : [],
+        getSignature: parsed => parsed.cardIds.join('|'),
+        onPage: (parsed, page) => {
+          parsed.items.forEach(item => itemsById.set(item.vn_id || item.url, item));
+          addLog(`Page ${page}: ${parsed.items.length} visual novels`, 'info', 'vndb-page-progress');
+          const completedPages = Math.min(page, Math.max(2, parsed.totalPages || page));
+          setProgressInStage('basic', completedPages, Math.max(2, parsed.totalPages || completedPages), 1, 20);
+        },
+      });
+      if (pagination.stopReason === 'empty') {
+        setProgressAtStageEnd('basic', 1, 20);
+        addLog(`Page ${pagination.lastPage} is empty; pagination complete`);
+      } else if (pagination.stopReason === 'repeated' || pagination.stopReason === 'missing-signature') {
+        setProgressAtStageEnd('basic', 1, 20);
+        addLog(`Page ${pagination.lastPage} repeated an earlier page; pagination complete`);
+      }
+      removeLog('vndb-page-progress');
+      setProgressAtStageEnd('basic', 1, 20);
+
+      if (includeGenres) {
+        const genreResult = await enrichVndbItemsWithGenres([...itemsById.values()]);
+        checkExportCancelled();
+        addLog(`VNDB tags complete: ${genreResult.taggedItems}/${itemsById.size} visual novels tagged; ${genreResult.totalGenres} total tags`);
+        if (genreResult.failures) {
+          addLog(`VNDB genre pages unavailable: ${genreResult.failures}`, 'error');
+        }
+      }
+
+      const payload = buildVndbPayload(
+        [...itemsById.values()].sort((a, b) => compareNatural(a.title, b.title)),
+        username,
+        firstPageUrl,
+        configAtExport,
+        includeGenres
+      );
+      const formats = getSelectedFileFormats();
+      const prepared = prepareFormatsForDownload(formats);
+      if (!prepared.canDownload) return;
+      const htmlPayload = formats.html
+        ? await prepareHtmlPayloadWithOfflineCovers('vndb', payload, includeOfflineCovers)
+        : payload;
+      downloadPayloadFiles({
+        source: 'vndb',
+        payload,
+        htmlPayload,
+        formats,
+        baseName: libraryBaseName('vndb', username),
+      });
+      setProgress(100);
+      addLog(`Finished: ${payload.items.length} visual novels exported`);
+      addLog(`Export took ${formatExportElapsedTime(exportStartedAt)}`);
+    });
+  }
+
+  async function runIgdbExport({ includeEnhancedMetadata = false, includeOfflineCovers = false } = {}) {
+    return runExportSession(async exportStartedAt => {
+      setActiveExportProgressPlan(makeBasicAdvancedProgressPlan(includeEnhancedMetadata));
+      const requiredPageUrl = redirectToSelectedIgdbTargetIfNeeded();
+      if (requiredPageUrl && navigateToCorrectSourcePage(requiredPageUrl)) return;
+      const username = getIgdbUserSlug();
+      if (!username) throw new Error('Could not determine the IGDB profile username from this page.');
+      const configAtExport = normalizeStatusPillConfig(cloneStatusPillConfig(statusPillConfig));
+      const mappings = getIgdbConfiguredStatusMappings(configAtExport);
+      if (!mappings.size) {
+        throw new Error('Assign at least one IGDB status to a status pill in the Configuration menu before exporting.');
+      }
+
+      const itemsByUrl = new Map();
+      addLog(`Starting IGDB export for ${username}`);
+      const listDefinitions = isIgdbListsTarget()
+        ? await fetchIgdbListCollections({ force: true })
+        : IGDB_LIST_DEFINITIONS;
+      if (!listDefinitions.length) throw new Error('No IGDB lists were found on this profile.');
+      const cachedBasicPages = igdbBasicScrapeCache
+        && igdbBasicScrapeCache.username === username
+        && igdbBasicScrapeCache.listsTarget === isIgdbListsTarget()
+        && Array.isArray(igdbBasicScrapeCache.pages)
+        ? igdbBasicScrapeCache.pages
+        : [];
+      if (cachedBasicPages.length) {
+        addLog(`Using cached IGDB basic scrape: ${cachedBasicPages.length} page${cachedBasicPages.length === 1 ? '' : 's'}`);
+        cachedBasicPages.forEach(cachedPage => {
+          const doc = new DOMParser().parseFromString(cachedPage.html, 'text/html');
+          const parsed = parseIgdbListDocument(doc, cachedPage.pageUrl, configAtExport);
+          parsed.items.forEach(item => {
+            const existing = itemsByUrl.get(item.url);
+            if (!existing) {
+              itemsByUrl.set(item.url, item);
+              return;
+            }
+            existing.statuses = [...new Set([...(existing.statuses || []), ...(item.statuses || [])])];
+            existing.status_ids = [...new Set([...(existing.status_ids || []), ...(item.status_ids || [])])];
+          });
+        });
+        setProgressAtStageEnd('basic', 1, 20);
+      } else for (let listIndex = 0; listIndex < listDefinitions.length; listIndex += 1) {
+        const list = listDefinitions[listIndex];
+        let listCount = 0;
+        const pagination = await paginatePages({
+          startPage: 1,
+          maxPage: 1000,
+          loadPage: async page => {
+            const listUrl = list.url || `https://www.igdb.com/users/${encodeURIComponent(username)}/lists/${list.slug}`;
+            const pageUrlObject = new URL(listUrl);
+            pageUrlObject.searchParams.set('page', String(page));
+            pageUrlObject.searchParams.set('per_page', '100');
+            const pageUrl = pageUrlObject.href;
+            addLog(`Loading IGDB ${list.name} page ${page}...`, 'info', 'igdb-page-progress');
+            await waitForRequestSlot('igdb', IGDB_REQUEST_DELAY_MIN_MS, IGDB_REQUEST_DELAY_MAX_MS);
+            const doc = await withIgdbRenderedListDocument(pageUrl);
+            return parseIgdbListDocument(doc, pageUrl, configAtExport);
+          },
+          getItems: parsed => parsed.cardCount ? parsed.items : [],
+          getSignature: (parsed, page) => parsed.signature || `unconfigured:${list.slug}:${page}:${parsed.cardCount}`,
+          onPage: (parsed, page) => {
+            parsed.items.forEach(item => {
+              const existing = itemsByUrl.get(item.url);
+              if (!existing) {
+                itemsByUrl.set(item.url, item);
+                return;
+              }
+              existing.statuses = [...new Set([...(existing.statuses || []), ...(item.statuses || [])])];
+              existing.status_ids = [...new Set([...(existing.status_ids || []), ...(item.status_ids || [])])];
+            });
+            listCount += parsed.items.length;
+            addLog(`${list.name} page ${page}: ${parsed.items.length} games`, 'info', 'igdb-page-progress');
+            const listProgress = (listIndex + Math.min(1, page / Math.max(1, parsed.totalPages))) / listDefinitions.length;
+            setProgressInStage('basic', listProgress, 1, 1, 20);
+          },
+          shouldStop: (parsed, page) => page >= parsed.totalPages,
+        });
+        if (pagination.stopReason === 'empty') {
+          addLog(`${list.name} page ${pagination.lastPage} is empty; moving to the next list`);
+        } else if (pagination.stopReason === 'repeated') {
+          addLog(`${list.name} page ${pagination.lastPage} repeated an earlier page; pagination complete`);
+        }
+        addLog(`${list.name}: ${listCount} games`);
+      }
+      removeLog('igdb-page-progress');
+      setProgressAtStageEnd('basic', 1, 20);
+
+      const items = [...itemsByUrl.values()].sort((a, b) =>
+        compareNatural(a.title, b.title)
+      );
+      if (includeEnhancedMetadata) {
+        if (!items.length) throw new Error('IGDB Advanced found no games to render.');
+        setProgressAtStageStart('advanced', 20, 95);
+        addLog(`IGDB Advanced will render ${items.length} game pages without an artificial rate limit`);
+        const advanced = await enrichIgdbItemsFromRenderedGamePages(items);
+        addLog(`IGDB Advanced: enriched ${advanced.enriched} of ${items.length} games`);
+        if (advanced.missing.length) {
+          addLog(`No rendered metadata found for ${advanced.missing.length} game${advanced.missing.length === 1 ? '' : 's'}`, 'error');
+        }
+        if (advanced.failed.length) {
+          addLog(`IGDB Advanced failed for ${advanced.failed.length} game page${advanced.failed.length === 1 ? '' : 's'}`, 'error');
+        }
+      }
+      const source = `https://www.igdb.com/users/${encodeURIComponent(username)}`;
+      const payload = buildIgdbPayload(items, username, configAtExport, source);
+      const formats = getSelectedFileFormats();
+      const prepared = prepareFormatsForDownload(formats);
+      if (!prepared.canDownload) return;
+      const htmlPayload = formats.html
+        ? await prepareHtmlPayloadWithOfflineCovers('igdb', payload, includeOfflineCovers)
+        : payload;
+      downloadPayloadFiles({
+        source: 'igdb',
+        payload,
+        htmlPayload,
+        formats,
+        baseName: libraryBaseName('igdb', username),
+      });
+      setProgress(100);
+      addLog(`Finished: ${payload.items.length} IGDB games exported`);
+      addLog(`Export took ${formatExportElapsedTime(exportStartedAt)}`);
+    });
   }
 
   function getBackloggdExportOptionsFromControls() {
@@ -13669,6 +20483,27 @@ ${viewerScript}  </script>
   }
 
   function getHowLongToBeatExportOptionsFromControls() {
+    return {
+      includeEnhancedMetadata: chkGenres && chkGenres.checked,
+      includeOfflineCovers: chkOfflineCovers && chkOfflineCovers.checked,
+    };
+  }
+
+  function getVndbExportOptionsFromControls() {
+    return {
+      includeGenres: chkGenres && chkGenres.checked,
+      includeOfflineCovers: chkOfflineCovers && chkOfflineCovers.checked,
+    };
+  }
+
+  function getGameFaqsExportOptionsFromControls() {
+    return {
+      includeEnhancedMetadata: chkGenres && chkGenres.checked,
+      includeOfflineCovers: chkOfflineCovers && chkOfflineCovers.checked,
+    };
+  }
+
+  function getIgdbExportOptionsFromControls() {
     return {
       includeEnhancedMetadata: chkGenres && chkGenres.checked,
       includeOfflineCovers: chkOfflineCovers && chkOfflineCovers.checked,
@@ -13705,11 +20540,42 @@ ${viewerScript}  </script>
     },
   });
 
+  configureSourceDescriptor('vndb', {
+    runtime: {
+      id: SOURCE_REGISTRY.vndb.id,
+      getOptionsFromControls: getVndbExportOptionsFromControls,
+      runExport: runVndbExport,
+      resumeExport: null,
+      clearExportState: null,
+    },
+  });
+
+  configureSourceDescriptor('gamefaqs', {
+    runtime: {
+      id: SOURCE_REGISTRY.gamefaqs.id,
+      getOptionsFromControls: getGameFaqsExportOptionsFromControls,
+      runExport: runGameFaqsExport,
+      resumeExport: null,
+      clearExportState: null,
+    },
+  });
+
+  configureSourceDescriptor('igdb', {
+    runtime: {
+      id: SOURCE_REGISTRY.igdb.id,
+      getOptionsFromControls: getIgdbExportOptionsFromControls,
+      runExport: runIgdbExport,
+      resumeExport: null,
+      clearExportState: null,
+    },
+  });
+
   // Download only the selected file types
   async function runExportWithOptions() {
+    if (redirectToSourceActionPageIfNeeded()) return;
     const startFormats = getSelectedFileFormats();
     if (!getFileFormatLabels(startFormats).length) {
-      alert('Please select at least one file format (CSV, JSON, or HTML).');
+      window.alert('Please select at least one file format (CSV, JSON, or HTML).');
       return;
     }
     const runtime = getSourceRuntimeDescriptorForHost();
@@ -13735,6 +20601,15 @@ ${viewerScript}  </script>
       'hltb-advanced-game-page-parser',
       'hltb-normalization-merge',
       'hltb-output-builders',
+      'gamefaqs-list-parser',
+      'gamefaqs-pagination-fields',
+      'gamefaqs-advanced-game-page-parser',
+      'gamefaqs-normalization-merge',
+      'gamefaqs-output-builders',
+      'igdb-list-parser',
+      'igdb-default-status-config',
+      'igdb-output-builders',
+      'vndb-genre-parser',
       'shared-json-contract',
     ],
     descriptors: [
@@ -13743,12 +20618,15 @@ ${viewerScript}  </script>
       'format-descriptor-supported-formats',
       'format-descriptor-builder-functions',
       'adapter-descriptor-identity',
+      'adapter-descriptor-exported-html-template',
       'adapter-descriptor-file-routing',
       'adapter-descriptor-shared-fields',
       'adapter-descriptor-source-meta-fields',
       'adapter-descriptor-ui-status-config',
       'adapter-descriptor-offline-cover-options',
       'hltb-descriptor-runtime-format',
+      'gamefaqs-descriptor-runtime-format',
+      'igdb-descriptor-runtime-format',
     ],
   };
 
@@ -13760,6 +20638,116 @@ ${viewerScript}  </script>
 
   // Passive diagnostics for payload shape and descriptor wiring.
   function runExporterDiagnostics() {
+    const igdbConfig = makeDefaultIgdbStatusPillConfig();
+    const igdbDoc = new DOMParser().parseFromString(`
+      <script data-component-name="WrappedHeader" type="application/json">{"user":{"username":"tester","slug":"tester"}}</script>
+      <script data-component-name="Pagination" type="application/json">{"totalPages":2}</script>
+      <script data-component-name="ListEntry" type="application/json">{
+        "game":{"id":42,"title":"Example IGDB Game","url":"https://www.igdb.com/games/example","year":2024,"coverSrc":"//images.igdb.com/igdb/image/upload/t_cover_big/example.jpg"},
+        "listEntryData":{
+          "platforms":[
+            {"releaseYear":2024,"releaseMonth":5,"releaseDay":2,"releaseDate":"2024-05-02","region":8,"releaseDateStatusId":6,"platform":{"id":6,"name":"PC (Microsoft Windows)"}},
+            {"releaseYear":2024,"releaseMonth":5,"releaseDay":1,"releaseDate":null,"region":1,"releaseDateStatusId":2,"platform":{"id":48,"name":"PlayStation 4"}},
+            {"releaseYear":2024,"releaseMonth":5,"releaseDay":3,"releaseDate":"2024-05-03","region":2,"releaseDateStatusId":6,"platform":{"id":48,"name":"PlayStation 4"}},
+            {"releaseYear":null,"releaseMonth":null,"releaseDay":null,"releaseDate":null,"region":8,"releaseDateStatusId":6,"platform":{"id":14,"name":"Mac"}}
+          ],
+          "selectedListEntries":[
+            {"list":{"name":"Played"},"listEntryStatus":{"name":"Completed"}},
+            {"list":{"name":"Playing"},"listEntryStatus":{"name":"On-hold"}}
+          ]
+        }
+      }</script>
+    `, 'text/html');
+    const igdbParsed = parseIgdbListDocument(
+      igdbDoc,
+      'https://www.igdb.com/users/tester/lists/playing?page=1&per_page=100',
+      igdbConfig
+    );
+    if (igdbParsed.username !== 'tester'
+      || igdbParsed.totalPages !== 2
+      || igdbParsed.cardCount !== 1
+      || igdbParsed.items.length !== 1
+      || igdbParsed.items[0].status !== 'On-hold'
+      || igdbParsed.items[0].status_id !== 'igdb-on-hold'
+      || igdbParsed.rawStatusCounts['On-hold'] !== 1
+      || igdbParsed.items[0].release_date !== '2024-05-02'
+      || igdbParsed.items[0].platforms.join('|') !== 'Mac|PC (Microsoft Windows)|PlayStation 4'
+      || igdbParsed.items[0].platform_releases.length !== 4
+      || igdbParsed.items[0].platform_releases.some(release => release.release_date === '0000-00-00')
+      || igdbParsed.items[0].cover_url.indexOf('https://images.igdb.com/') !== 0) {
+      throw new Error('IGDB list parser did not extract the React component payload correctly.');
+    }
+    applyIgdbGamePageMetadata(igdbParsed.items[0], {
+      genres: ['Role-playing (RPG)'],
+      themes: ['Action'],
+      averageRating: 9.2,
+      userRating: 8,
+      ratingCountLabel: '2k+ user ratings',
+    });
+    if (igdbParsed.items[0].genres.join('|') !== 'Action|Role-playing (RPG)'
+      || igdbParsed.items[0].release_date !== '2024-05-02'
+      || igdbParsed.items[0].average_rating !== 9.2
+      || igdbParsed.items[0].user_rating !== 8
+      || igdbParsed.items[0].rating_count_label !== '2k+ user ratings') {
+      throw new Error('IGDB rendered-page metadata merger did not preserve advanced fields.');
+    }
+    const igdbGroups = igdbConfig.categories || [];
+    if (igdbGroups.length !== 3
+      || igdbGroups[0].pills[0].label !== 'Played'
+      || igdbGroups[0].pills[0].sources.length !== 7
+      || !igdbGroups[0].pills[1].collections.some(collection => collection.name === 'Played-No Status')
+      || !igdbGroups[1].pills[0].collections.some(collection => collection.name === 'Playing-No Status')
+      || igdbGroups[2].pills[0].label !== 'Want'
+      || igdbGroups[2].pills[0].sources.length !== 2
+      || !igdbGroups[2].pills[1].collections.some(collection => collection.name === 'Want-No Status')) {
+      throw new Error('IGDB default status pill configuration is incorrect.');
+    }
+    const igdbPayload = buildIgdbPayload(igdbParsed.items, 'tester', igdbConfig, 'https://www.igdb.com/users/tester');
+    const igdbJson = JSON.parse(buildIgdbJson(igdbPayload));
+    if (igdbJson.sourceWebsite !== 'IGDB'
+      || igdbJson.items[0].source_meta.game_id !== '42'
+      || igdbJson.items[0].source_meta.list_slug !== 'playing'
+      || igdbJson.items[0].source_meta.platform_releases.length !== 4
+      || igdbJson.items[0].source_meta.rating_count_label !== '2k+ user ratings'
+      || !igdbJson.items[0].source_meta.igdb_themes.includes('Action')
+      || igdbJson.items[0].platforms.length !== 3
+      || igdbJson.items[0].release_date !== '2024-05-02'
+      || igdbJson.items[0].average_rating !== 9.2
+      || igdbJson.items[0].user_rating !== 8
+      || !igdbJson.items[0].genres.includes('Role-playing (RPG)')
+      || !buildIgdbCsv(igdbPayload).includes('Example IGDB Game')
+      || !parseViewerPayloadFromHtmlForDiagnostics(buildIgdbHtml(igdbPayload), 'IGDB').items.length) {
+      throw new Error('IGDB output builders did not preserve canonical fields.');
+    }
+
+    const vndbGenreDoc = new DOMParser().parseFromString(`
+      <div id="vntags">
+        <span class="tagspl0 cat_cont"><a href="/g500">Psychological Problems</a><small> 3.0</small></span>
+        <span class="tagspl1 cat_cont"><a href="/g288">Minor Spoiler</a><sup>S</sup><small> 2.8</small></span>
+        <span class="tagspl0 cat_tech"><a href="/g43">NVL</a><small> 2.9</small></span>
+        <span class="tagspl2 cat_ero"><a href="/g2962">Major Spoiler</a><sup>S</sup><small> 2.7</small></span>
+      </div>
+    `, 'text/html');
+    const vndbGenres = extractVndbGenres(vndbGenreDoc);
+    if (vndbGenres.length !== 2 || vndbGenres[0] !== 'Psychological Problems' || vndbGenres[1] !== 'NVL') {
+      throw new Error('VNDB genre parser did not preserve non-spoiler anchor names in page order.');
+    }
+    const vndbTagPayload = buildVndbPayload([{
+      title: 'Example VNDB Game',
+      url: 'https://vndb.org/v1',
+      status: 'Finished',
+      statuses: ['Finished'],
+      status_ids: ['vndb-finished'],
+      genres: ['Drama', 'NVL'],
+    }], 'tester', 'https://vndb.org/u1/ulist', makeDefaultVndbStatusPillConfig(), true);
+    const vndbTagJson = JSON.parse(buildVndbJson(vndbTagPayload));
+    if (!vndbTagJson.include_tags || vndbTagJson.include_genres !== undefined || !vndbTagJson.items[0].tags.includes('Drama') || vndbTagJson.items[0].genres !== undefined) {
+      throw new Error('VNDB JSON did not export tags terminology.');
+    }
+    const vndbTagCsvHeader = buildVndbCsv(vndbTagPayload).split(/\r?\n/).find(line => line && String(line).replace(/^\uFEFF/, '')[0] !== '#');
+    if (!vndbTagCsvHeader.split(',').includes('tags') || vndbTagCsvHeader.split(',').includes('genres')) {
+      throw new Error('VNDB CSV did not export a tags column.');
+    }
     const mobyPayload = {
       sourceWebsite: getSourceWebsite('mobygames'),
       username: 'tester',
@@ -13957,7 +20945,7 @@ ${viewerScript}  </script>
 
     const csv = buildMobyGamesCsv(mobyPayload);
     const header = csv.split(/\r?\n/).find(line => line && line[0] !== '#');
-    const expectedHeader = 'release_date,title,status,average_rating,user_rating,genres,gameplay,platforms,game_id,url,cover_url,collection,collection_url,release_year,full_release_date,status_ids';
+    const expectedHeader = 'release_date,title,status,average_rating,user_rating,genres,gameplay,platforms,game_id,url,cover_url,collection,collection_url,release_year,status_ids';
     if (header !== expectedHeader) throw new Error('MobyGames CSV header order is not unified.');
 
     const backloggdPayload = normalizeSharedExportPayload({
@@ -14043,6 +21031,35 @@ ${viewerScript}  </script>
     if (!hltbCategories.some(category => category.name === 'On Hold' && category.url === 'https://howlongtobeat.com/user/tester/games/custom/1')) {
       throw new Error('HowLongToBeat category discovery did not map the first custom category to the custom route.');
     }
+    const hltbUserDataDoc = new DOMParser().parseFromString(`
+      <script id="__NEXT_DATA__" type="application/json">${JSON.stringify({
+        props: {
+          pageProps: {
+            userData: {
+              stats_playing: 1,
+              stats_backlog: 2,
+              stats_replays: 3,
+              stats_custom: 4,
+              stats_custom2: 5,
+              stats_custom3: 6,
+              stats_completed: 7,
+              stats_retired: 8,
+              set_customtab: 'Paused',
+              set_customtab2: 'Wishlist',
+              set_customtab3: 'Abandoned',
+            },
+          },
+        },
+      })}</script>
+    `, 'text/html');
+    const hltbUserDataCategories = parseHowLongToBeatCategoriesDocument(hltbUserDataDoc);
+    if (hltbUserDataCategories.map(category => `${category.name}:${category.games}`).join('|')
+      !== 'Playing:1|Backlog:2|Replays:3|Paused:4|Wishlist:5|Abandoned:6|Completed:7|Retired:8') {
+      throw new Error('HowLongToBeat __NEXT_DATA__ category counts were not mapped correctly.');
+    }
+    if (hltbUserDataCategories[4].url !== 'https://howlongtobeat.com/user/tester/games/custom2/1') {
+      throw new Error('HowLongToBeat __NEXT_DATA__ custom category route mapping is incorrect.');
+    }
 
     const hltbMapping = {
       statusId: 'completed',
@@ -14054,21 +21071,71 @@ ${viewerScript}  </script>
       <div id="user_games">
         <a href="https://howlongtobeat.com/user/tester/games/completed/1">Game</a>
         <div class="game-row">
-          <a href="/game/123">Example HLTB Game</a>
-          <span class="platform">PC</span>
+          <div class="game-title"><a href="/game/123">Example HLTB Game</a><span class="platform">PC</span></div>
+          <span class="user-rating">80%</span>
         </div>
         <div class="game-row">
           <a href="https://howlongtobeat.com/game/456">Console HLTB Game</a>
           <span aria-label="Platform">Nintendo Switch</span>
+          <div class="UserGameList-module__FnTDZq__table_cell">100%</div>
+          <img class="BoxArt-module__GqMkoa__box_art_image"
+            srcset="https://howlongtobeat.com/games/example.jpg?width=80&amp;crop=48%3A48%2Csmart 1x, https://howlongtobeat.com/games/example.jpg?width=100&amp;crop=48%3A48%2Csmart 2x"
+            src="https://howlongtobeat.com/games/example.jpg?width=100&amp;crop=48%3A48%2Csmart">
+        </div>
+        <div class="game-row">
+          <a href="https://howlongtobeat.com/game/789">Balatro</a>
+          <div class="UserGameList-module__FnTDZq__table_cell">NR</div>
         </div>
       </div>
     `, 'text/html');
     const hltbParsed = parseHowLongToBeatGamesDocument(hltbGamesDoc, 'https://howlongtobeat.com/user/tester/games/completed/1', hltbMapping);
-    if (hltbParsed.games.length !== 2 || hltbParsed.games[0].title !== 'Example HLTB Game' || hltbParsed.games[0].platform !== 'PC') {
+    if (hltbParsed.games.length !== 3 || hltbParsed.games[0].title !== 'Example HLTB Game' || hltbParsed.games[0].platform !== 'PC') {
       throw new Error('HowLongToBeat game parser did not extract title/platform rows.');
     }
     if (hltbParsed.games[0].url !== 'https://howlongtobeat.com/game/123') {
       throw new Error('HowLongToBeat game parser did not normalize game URLs.');
+    }
+    if (hltbParsed.games[0].user_rating !== 8 || hltbParsed.games[1].user_rating !== 10) {
+      throw new Error('HowLongToBeat game parser did not convert list-page user rating percentages to a 1-10 scale.');
+    }
+    if (hltbParsed.games[2].user_rating !== null) {
+      throw new Error('HowLongToBeat game parser assigned a rating to an NR list entry.');
+    }
+    if (hltbParsed.games[1].cover_url !== 'https://howlongtobeat.com/games/example.jpg') {
+      throw new Error('HowLongToBeat game parser did not extract the List/Box cover URL.');
+    }
+    const hltbCollectionMapping = {
+      statusId: 'favorites',
+      status: 'Favorites',
+      statusColor: '#7dd3fc',
+      collection: {
+        name: 'First Person Games with Good Stories',
+        url: 'https://howlongtobeat.com/user/tester/lists/1',
+        games: 1,
+      },
+    };
+    const hltbCollectionDoc = new DOMParser().parseFromString(`
+      <table><tbody><tr>
+        <td><a href="/game/1065">BioShock</a></td>
+        <td><img class="BoxArt-module__GqMkoa__box_art_image"
+          srcset="https://howlongtobeat.com/games/Bioshockcoverfinalcropped.jpg?width=80&amp;crop=50%3A50%2Csmart 1x, https://howlongtobeat.com/games/Bioshockcoverfinalcropped.jpg?width=100&amp;crop=50%3A50%2Csmart 2x"
+          src="https://howlongtobeat.com/games/Bioshockcoverfinalcropped.jpg?width=100&amp;crop=50%3A50%2Csmart"></td>
+        <td class="mobile_hide">14½ Hours</td>
+        <td class="mobile_hide">85%</td>
+      </tr></tbody></table>
+    `, 'text/html');
+    const hltbCollectionParsed = parseHowLongToBeatCollectionGamesDocument(
+      hltbCollectionDoc,
+      hltbCollectionMapping.collection.url,
+      hltbCollectionMapping
+    );
+    const hltbCollectionGame = hltbCollectionParsed.games[0];
+    if (!hltbCollectionGame
+      || hltbCollectionGame.title !== 'BioShock'
+      || hltbCollectionGame.length !== '14½ Hours'
+      || hltbCollectionGame.average_rating !== 8.5
+      || hltbCollectionGame.cover_url !== 'https://howlongtobeat.com/games/Bioshockcoverfinalcropped.jpg') {
+      throw new Error('HowLongToBeat Collection Basic parser did not extract Blox view metadata.');
     }
     const hltbSignature = hltbParsed.games.map(game => `${game.gameUrl}|${game.platform}`).join('||');
     if (!hltbSignature || ![hltbSignature].includes(hltbSignature)) {
@@ -14141,10 +21208,28 @@ ${viewerScript}  </script>
         category_url: 'https://howlongtobeat.com/user/tester/games/retired/1',
         collection: 'Retired',
         collection_url: 'https://howlongtobeat.com/user/tester/games/retired/1',
+        user_rating: null,
+      },
+      {
+        ...hltbParsed.games[0],
+        status: 'Playing',
+        statuses: ['Playing'],
+        statusId: 'playing',
+        status_id: 'playing',
+        statusIds: ['playing'],
+        status_ids: ['playing'],
+        category: 'Playing',
+        category_url: 'https://howlongtobeat.com/user/tester/games/playing/1',
+        collection: 'Playing',
+        collection_url: 'https://howlongtobeat.com/user/tester/games/playing/1',
+        user_rating: 10,
       },
     ], hltbConfig);
-    if (hltbMerged.length !== 1 || hltbMerged[0].statuses.length !== 2 || hltbMerged[0].category_urls.length !== 2) {
+    if (hltbMerged.length !== 1 || hltbMerged[0].statuses.length !== 3 || hltbMerged[0].category_urls.length !== 3) {
       throw new Error('HowLongToBeat merge did not preserve multiple statuses/categories for one game.');
+    }
+    if (hltbMerged[0].user_rating !== 10) {
+      throw new Error('HowLongToBeat merge did not preserve the highest user rating across categories.');
     }
     const hltbPayload = {
       sourceWebsite: getSourceWebsite('howlongtobeat'),
@@ -14160,7 +21245,7 @@ ${viewerScript}  </script>
     if (hltbJsonPayload.sourceWebsite !== getSourceWebsite('howlongtobeat') || hltbJsonItem.title !== 'Example HLTB Game') {
       throw new Error('HowLongToBeat JSON builder did not preserve source identity/title.');
     }
-    if (!hltbJsonItem.source_meta || hltbJsonItem.source_meta.category !== 'Completed; Retired') {
+    if (!hltbJsonItem.source_meta || hltbJsonItem.source_meta.category !== 'Completed; Retired; Playing') {
       throw new Error('HowLongToBeat JSON source_meta is missing category data.');
     }
     const hltbHtml = buildHowLongToBeatHtml(hltbPayload);
@@ -14168,7 +21253,7 @@ ${viewerScript}  </script>
     if (hltbHtmlPayload.sourceWebsite !== getSourceWebsite('howlongtobeat') || !hltbHtmlPayload.status_pill_config) {
       throw new Error('HowLongToBeat HTML builder did not preserve source identity/status config.');
     }
-    if (!hltbHtmlPayload.items[0].source_meta || hltbHtmlPayload.items[0].source_meta.category !== 'Completed; Retired') {
+    if (!hltbHtmlPayload.items[0].source_meta || hltbHtmlPayload.items[0].source_meta.category !== 'Completed; Retired; Playing') {
       throw new Error('HowLongToBeat HTML builder did not preserve category source_meta.');
     }
     const hltbHtmlDoc = new DOMParser().parseFromString(hltbHtml, 'text/html');
@@ -14178,13 +21263,13 @@ ${viewerScript}  </script>
       throw new Error('HowLongToBeat HTML configured status pill counts did not use exported status ids.');
     }
     const hltbCsvHeader = buildHowLongToBeatCsv(hltbPayload).split(/\r?\n/).find(line => line && line[0] !== '#');
-    if (hltbCsvHeader !== 'release_date,title,status,average_rating,user_rating,genres,platforms,game_id,url,cover_url,category,category_url,status_ids') {
+    if (hltbCsvHeader !== 'release_date,title,status,length,average_rating,user_rating,genres,platforms,game_id,url,cover_url,category,category_url,status_ids') {
       throw new Error('HowLongToBeat CSV header order is not unified.');
     }
     const hltbConvertedCsvPayload = parseHowLongToBeatCsvExportPayload([
       '# Exported from HowLongToBeat',
-      'release_date,title,status,average_rating,user_rating,genres,platforms,game_id,url,cover_url,category,category_url,status_ids',
-      '2024,CSV HLTB Game,Completed,4.1,3.5,Action; RPG,PC,https://howlongtobeat.com/game/999,https://howlongtobeat.com/game/999,https://cdn.example.test/hltb.jpg,Completed,https://howlongtobeat.com/user/tester/games/completed/1,completed',
+      'release_date,title,status,length,average_rating,user_rating,genres,platforms,game_id,url,cover_url,category,category_url,status_ids',
+      '2024,CSV HLTB Game,Completed,,4.1,3.5,Action; RPG,PC,https://howlongtobeat.com/game/999,https://howlongtobeat.com/game/999,https://cdn.example.test/hltb.jpg,Completed,https://howlongtobeat.com/user/tester/games/completed/1,completed',
     ].join('\n'), 'tester-howlongtobeat-library.csv');
     const hltbConvertedHtmlPayload = parseViewerPayloadFromHtmlForDiagnostics(buildHowLongToBeatHtml(hltbConvertedCsvPayload), 'HowLongToBeat converted CSV');
     const hltbConvertedItem = hltbConvertedHtmlPayload.items && hltbConvertedHtmlPayload.items[0];
@@ -14193,6 +21278,201 @@ ${viewerScript}  </script>
     }
     if (hltbConvertedItem.average_rating !== 4.1 || hltbConvertedItem.user_rating !== 3.5) {
       throw new Error('HowLongToBeat CSV conversion did not preserve ratings.');
+    }
+
+    const gameFaqsMapping = getGameFaqsConfiguredListMappings(makeDefaultGameFaqsStatusPillConfig())[0];
+    const gameFaqsListsDoc = new DOMParser().parseFromString(`
+      <ol class="list">
+        <li><div class="content"><a class="float_l bold" href="/mygames/lists?list=1">Played</a><div class="meta float_r">2 games</div></div></li>
+        <li><div class="content"><a class="float_l bold" href="/mygames/lists?list=2">Test</a><div class="meta float_r">1 game</div></div></li>
+        <li><div class="content"><a class="bold" href="/mygames/lists?list=-1">Create a New List</a></div></li>
+      </ol>
+    `, 'text/html');
+    const gameFaqsCustomLists = parseGameFaqsCustomListsDocument(gameFaqsListsDoc);
+    if (gameFaqsCustomLists.length !== 2
+      || gameFaqsCustomLists[0].name !== 'Played'
+      || gameFaqsCustomLists[0].games !== 2
+      || gameFaqsCustomLists[0].url !== 'https://gamefaqs.gamespot.com/mygames/lists?list=1') {
+      throw new Error('GameFAQs custom list discovery did not preserve names, counts, and URLs.');
+    }
+    const gameFaqsCustomConfig = makeDefaultGameFaqsCustomListsStatusPillConfig(gameFaqsCustomLists);
+    const gameFaqsCustomMappings = getGameFaqsConfiguredListMappings(gameFaqsCustomConfig);
+    if (gameFaqsCustomMappings.length !== 2
+      || gameFaqsCustomMappings[0].listId !== 1
+      || gameFaqsCustomMappings[0].target !== 'lists'
+      || gameFaqsCustomConfig.categories[0].pills[0].collections[0].games !== 2) {
+      throw new Error('GameFAQs custom lists were not mapped to status pills.');
+    }
+    const gameFaqsDoc = new DOMParser().parseFromString(`
+      <div class="pod mg_list">
+        <span id="list_count">101</span>
+        <ol><li class="list_game" data-pid="716473">
+          <div class="list_img"><img class="imgboxart" src="/a/box/1/4/2/282142_thumb.jpg"></div>
+          <div class="content"><a class="bold" href="/3ds/716473-3d-altered-beast">3D Altered Beast</a><div class="meta">3DS (2013)</div></div>
+        </li></ol>
+        <ul class="paginate"><li>Page 1 of 2</li></ul>
+      </div>
+    `, 'text/html');
+    const gameFaqsParsed = parseGameFaqsListDocument(gameFaqsDoc, getGameFaqsAjaxListUrl(-5, 0), gameFaqsMapping);
+    if (gameFaqsParsed.games.length !== 1
+      || gameFaqsParsed.games[0].title !== '3D Altered Beast'
+      || gameFaqsParsed.games[0].platform !== '3DS'
+      || gameFaqsParsed.games[0].release_year !== 2013
+      || gameFaqsParsed.games[0].url !== 'https://gamefaqs.gamespot.com/3ds/716473-3d-altered-beast'
+      || gameFaqsParsed.totalPages !== 2
+      || parseGameFaqsListCount(gameFaqsDoc) !== 101) {
+      throw new Error('GameFAQs AJAX list parser did not extract the expected game fields or pagination.');
+    }
+    const malformedPcMeta = parseGameFaqsListMeta(
+      'PC 2016 -- 0 releases',
+      'https://gamefaqs.gamespot.com/pc/123-example'
+    );
+    const malformedPs4Meta = parseGameFaqsListMeta(
+      'PS4 2016 -- 0 releases',
+      'https://gamefaqs.gamespot.com/ps4/456-example'
+    );
+    const missingPlatformMeta = parseGameFaqsListMeta(
+      '2016 -- 0 releases',
+      'https://gamefaqs.gamespot.com/ps4/789-example'
+    );
+    if (malformedPcMeta.platform !== 'PC'
+      || malformedPcMeta.releaseYear !== 2016
+      || malformedPs4Meta.platform !== 'PS4'
+      || malformedPs4Meta.releaseYear !== 2016
+      || missingPlatformMeta.platform !== 'PS4'
+      || missingPlatformMeta.releaseYear !== 2016) {
+      throw new Error('GameFAQs list metadata parser did not remove release-count text from platform values.');
+    }
+    const gameFaqsDetailDoc = new DOMParser().parseFromString(`
+      <html><head>
+        <meta id="utag-data" content='{"productPlatform":"PlayStation 3","productGenre":"Role-Playing|Action RPG"}'>
+        <script type="application/ld+json">{
+          "@type":"VideoGame",
+          "datePublished":"2011-10-04",
+          "gamePlatform":["PS3","X360","PC","NS"],
+          "genre":["Role-Playing","Action RPG"],
+          "description":"JSON-LD fallback description"
+        }</script>
+      </head><body>
+        <h1 class="page-title">Dark Souls</h1>
+        <h3 class="platform-title"><span class="header_more">PlayStation 3</span></h3>
+        <div id="header_more_menu">
+          <span class="also_name">Xbox 360</span>
+          <span class="also_name">Nintendo Switch</span>
+          <span class="also_name">PC</span>
+        </div>
+        <div class="game_desc">A dark fantasy action RPG.</div>
+        <div class="gamespace_rate_half" title="Average: 4.45 stars from 6676 users"><div id="gs_rate_avg"></div></div>
+        <div id="gs_rate_avg_hint">Outstanding (6676 ratings)</div>
+        <div class="gamespace_rate_half" title="Average: 4.17 hearts from 5285 users"><div id="gs_difficulty_avg"></div></div>
+        <div id="gs_difficulty_avg_hint">Tough/Unforgiving (5285)</div>
+        <div class="gamespace_rate_half" title="Average: 70 hours from 3388 users"><div id="gs_length_avg"></div></div>
+        <div id="gs_length_avg_hint">70 Hours (3388)</div>
+        <div class="pod_gameinfo">
+          <div class="content"><b>Genre:</b> <a>Role-Playing</a> &raquo; <a>Action RPG</a></div>
+          <div class="content"><b>Developer:</b> <a>From Software</a></div>
+          <div class="content"><b>Publisher:</b> <a>Namco Bandai Games</a></div>
+          <div class="content"><b>Release:</b> <a href="/ps3/606312-dark-souls/data">October 4, 2011</a></div>
+          <div class="metacritic"><a href="https://www.metacritic.com/game/dark-souls"><div class="score" title="Metascore from 66 critics">89</div></a></div>
+          <div class="esrb"><span class="esrb_logo esrb_logo_m" title="Suitable for ages 17 and up."></span></div>
+        </div>
+      </body></html>
+    `, 'text/html');
+    const gameFaqsDetails = extractGameFaqsGamePageDetails(
+      gameFaqsDetailDoc,
+      'https://gamefaqs.gamespot.com/ps3/606312-dark-souls'
+    );
+    if (gameFaqsDetails.title !== 'Dark Souls'
+      || gameFaqsDetails.releaseDate !== 'October 4, 2011'
+      || gameFaqsDetails.averageUserRating !== 4.45
+      || gameFaqsDetails.userRatingCount !== 6676
+      || gameFaqsDetails.averageLengthHours !== 70
+      || gameFaqsDetails.averageDifficulty !== 4.17
+      || gameFaqsDetails.developer !== 'From Software'
+      || gameFaqsDetails.publisher !== 'Namco Bandai Games'
+      || gameFaqsDetails.metacriticScore !== 89
+      || gameFaqsDetails.metacriticReviewCount !== 66
+      || gameFaqsDetails.ageRating !== 'M'
+      || !gameFaqsDetails.genres.includes('Action RPG')
+      || !gameFaqsDetails.platforms.includes('Nintendo Switch')
+      || !gameFaqsDetails.platforms.includes('Xbox 360')) {
+      throw new Error('GameFAQs advanced parser did not extract the expected overview metadata.');
+    }
+    const gameFaqsMerged = mergeGameFaqsItemsForExport([
+      {
+        ...gameFaqsParsed.games[0],
+        product_id: '800',
+        game_id: '800',
+        url: 'https://gamefaqs.gamespot.com/pc/800-3d-altered-beast',
+        gameUrl: 'https://gamefaqs.gamespot.com/pc/800-3d-altered-beast',
+        cover_url: 'https://gamefaqs.gamespot.com/a/box/pc-cover.jpg',
+        platform: 'PC',
+        platforms: ['PC'],
+        release_year: 2012,
+        release_date: '2012',
+      },
+      gameFaqsParsed.games[0],
+      {
+        ...gameFaqsParsed.games[0],
+        product_id: '900',
+        game_id: '900',
+        url: 'https://gamefaqs.gamespot.com/ps5/900-3d-altered-beast',
+        gameUrl: 'https://gamefaqs.gamespot.com/ps5/900-3d-altered-beast',
+        cover_url: 'https://gamefaqs.gamespot.com/a/box/ps5-cover.jpg',
+        platform: 'PS5',
+        platforms: ['PS5'],
+        release_year: 2025,
+        release_date: '2025',
+        list: 'Own Digitally',
+        lists: ['Own Digitally'],
+        list_id: -7,
+        list_ids: [-7],
+        status: 'Digitally',
+        statuses: ['Digitally'],
+        statusId: 'gamefaqs-digitally',
+        status_id: 'gamefaqs-digitally',
+        statusIds: ['gamefaqs-digitally'],
+        status_ids: ['gamefaqs-digitally'],
+      },
+    ]);
+    if (gameFaqsMerged.length !== 1
+      || gameFaqsMerged[0].statuses.length !== 2
+      || gameFaqsMerged[0].list_ids.length !== 2
+      || gameFaqsMerged[0].platforms.join('|') !== '3DS|PC|PS5'
+      || gameFaqsMerged[0].product_id !== '900'
+      || gameFaqsMerged[0].platform !== 'PS5'
+      || gameFaqsMerged[0].url !== 'https://gamefaqs.gamespot.com/ps5/900-3d-altered-beast'
+      || gameFaqsMerged[0].cover_url !== 'https://gamefaqs.gamespot.com/a/box/ps5-cover.jpg') {
+      throw new Error('GameFAQs merge did not preserve statuses/platforms or prioritize the console representative.');
+    }
+    const gameFaqsJsonPayload = JSON.parse(buildGameFaqsJson(buildGameFaqsPayload(
+      [{
+        ...gameFaqsMerged[0],
+        genres: gameFaqsDetails.genres,
+        release_date: gameFaqsDetails.releaseDate,
+        length: `${gameFaqsDetails.averageLengthHours} Hours`,
+        average_rating: gameFaqsDetails.averageUserRating,
+        developer: gameFaqsDetails.developer,
+        publisher: gameFaqsDetails.publisher,
+        user_rating_count: gameFaqsDetails.userRatingCount,
+        average_difficulty: gameFaqsDetails.averageDifficulty,
+      }],
+      'tester',
+      makeDefaultGameFaqsStatusPillConfig(),
+      getGameFaqsConfiguredListMappings(makeDefaultGameFaqsStatusPillConfig()),
+      'collection',
+      true
+    )));
+    if (gameFaqsJsonPayload.sourceWebsite !== 'GameFAQs'
+      || gameFaqsJsonPayload.items[0].source_meta.product_id !== '900'
+      || gameFaqsJsonPayload.items[0].source_meta.list_ids.length !== 2
+      || gameFaqsJsonPayload.items[0].source_meta.developer !== 'From Software'
+      || gameFaqsJsonPayload.items[0].average_rating !== 4.45
+      || !gameFaqsJsonPayload.items[0].genres.includes('Action RPG')
+      || !gameFaqsJsonPayload.include_genres
+      || gameFaqsJsonPayload.items[0].platforms.length !== 3
+      || gameFaqsJsonPayload.items[0].statuses.length !== 2) {
+      throw new Error('GameFAQs JSON builder did not preserve source metadata.');
     }
 
     if (getSourceRuntimeDescriptorForHost('www.mobygames.com').id !== SOURCE_REGISTRY.mobygames.id) {
@@ -14204,6 +21484,15 @@ ${viewerScript}  </script>
     if (getSourceRuntimeDescriptorForHost('backloggd.com').id !== SOURCE_REGISTRY.backloggd.id) {
       throw new Error('Runtime descriptor did not identify Backloggd host.');
     }
+    if (getSourceRuntimeDescriptorForHost('vndb.org').id !== SOURCE_REGISTRY.vndb.id) {
+      throw new Error('Runtime descriptor did not identify VNDB host.');
+    }
+    if (getSourceRuntimeDescriptorForHost('gamefaqs.gamespot.com').id !== SOURCE_REGISTRY.gamefaqs.id) {
+      throw new Error('Runtime descriptor did not identify GameFAQs host.');
+    }
+    if (getSourceRuntimeDescriptorForHost('www.igdb.com').id !== SOURCE_REGISTRY.igdb.id) {
+      throw new Error('Runtime descriptor did not identify IGDB host.');
+    }
     if (SOURCE_REGISTRY.mobygames.runtime.runExport !== runMobyGamesExport) {
       throw new Error('MobyGames runtime descriptor is not mapped to MobyGames export.');
     }
@@ -14213,11 +21502,23 @@ ${viewerScript}  </script>
     if (SOURCE_REGISTRY.backloggd.runtime.runExport !== runExport) {
       throw new Error('Backloggd runtime descriptor is not mapped to Backloggd export.');
     }
+    if (SOURCE_REGISTRY.vndb.runtime.runExport !== runVndbExport) {
+      throw new Error('VNDB runtime descriptor is not mapped to VNDB export.');
+    }
+    if (SOURCE_REGISTRY.gamefaqs.runtime.runExport !== runGameFaqsExport) {
+      throw new Error('GameFAQs runtime descriptor is not mapped to GameFAQs export.');
+    }
+    if (SOURCE_REGISTRY.igdb.runtime.runExport !== runIgdbExport) {
+      throw new Error('IGDB runtime descriptor is not mapped to IGDB export.');
+    }
 
     const expectedFormats = ['csv', 'json', 'html'];
     const backloggdFormatDescriptor = getSourceFormatDescriptor('backloggd');
     const mobyGamesFormatDescriptor = getSourceFormatDescriptor('mobygames');
     const hltbFormatDescriptor = getSourceFormatDescriptor('howlongtobeat');
+    const vndbFormatDescriptor = getSourceFormatDescriptor('vndb');
+    const gameFaqsFormatDescriptor = getSourceFormatDescriptor('gamefaqs');
+    const igdbFormatDescriptor = getSourceFormatDescriptor('igdb');
     if (backloggdFormatDescriptor.id !== SOURCE_REGISTRY.backloggd.id) {
       throw new Error('Format descriptor did not identify Backloggd mode.');
     }
@@ -14226,6 +21527,15 @@ ${viewerScript}  </script>
     }
     if (hltbFormatDescriptor.id !== SOURCE_REGISTRY.howlongtobeat.id) {
       throw new Error('Format descriptor did not identify HowLongToBeat mode.');
+    }
+    if (vndbFormatDescriptor.id !== SOURCE_REGISTRY.vndb.id) {
+      throw new Error('Format descriptor did not identify VNDB mode.');
+    }
+    if (gameFaqsFormatDescriptor.id !== SOURCE_REGISTRY.gamefaqs.id) {
+      throw new Error('Format descriptor did not identify GameFAQs mode.');
+    }
+    if (igdbFormatDescriptor.id !== SOURCE_REGISTRY.igdb.id) {
+      throw new Error('Format descriptor did not identify IGDB mode.');
     }
     if (!expectedFormats.every(format => backloggdFormatDescriptor.supportedFormats.includes(format))) {
       throw new Error('Backloggd format descriptor is missing a supported export format.');
@@ -14236,6 +21546,15 @@ ${viewerScript}  </script>
     if (!expectedFormats.every(format => hltbFormatDescriptor.supportedFormats.includes(format))) {
       throw new Error('HowLongToBeat format descriptor is missing a supported export format.');
     }
+    if (!expectedFormats.every(format => vndbFormatDescriptor.supportedFormats.includes(format))) {
+      throw new Error('VNDB format descriptor is missing a supported export format.');
+    }
+    if (!expectedFormats.every(format => gameFaqsFormatDescriptor.supportedFormats.includes(format))) {
+      throw new Error('GameFAQs format descriptor is missing a supported export format.');
+    }
+    if (!expectedFormats.every(format => igdbFormatDescriptor.supportedFormats.includes(format))) {
+      throw new Error('IGDB format descriptor is missing a supported export format.');
+    }
     if (backloggdFormatDescriptor.buildCsv !== buildCsv || backloggdFormatDescriptor.buildHtml !== buildHtml) {
       throw new Error('Backloggd format descriptor builder mapping is incorrect.');
     }
@@ -14245,10 +21564,22 @@ ${viewerScript}  </script>
     if (hltbFormatDescriptor.buildCsv !== buildHowLongToBeatCsv || hltbFormatDescriptor.buildJson !== buildHowLongToBeatJson || hltbFormatDescriptor.buildHtml !== buildHowLongToBeatHtml) {
       throw new Error('HowLongToBeat format descriptor builder mapping is incorrect.');
     }
+    if (vndbFormatDescriptor.buildCsv !== buildVndbCsv || vndbFormatDescriptor.buildJson !== buildVndbJson || vndbFormatDescriptor.buildHtml !== buildVndbHtml) {
+      throw new Error('VNDB format descriptor builder mapping is incorrect.');
+    }
+    if (gameFaqsFormatDescriptor.buildCsv !== buildGameFaqsCsv || gameFaqsFormatDescriptor.buildJson !== buildGameFaqsJson || gameFaqsFormatDescriptor.buildHtml !== buildGameFaqsHtml) {
+      throw new Error('GameFAQs format descriptor builder mapping is incorrect.');
+    }
+    if (igdbFormatDescriptor.buildCsv !== buildIgdbCsv || igdbFormatDescriptor.buildJson !== buildIgdbJson || igdbFormatDescriptor.buildHtml !== buildIgdbHtml) {
+      throw new Error('IGDB format descriptor builder mapping is incorrect.');
+    }
 
     const backloggdAdapterDescriptor = SOURCE_REGISTRY.backloggd;
     const mobyGamesAdapterDescriptor = SOURCE_REGISTRY.mobygames;
     const hltbAdapterDescriptor = SOURCE_REGISTRY.howlongtobeat;
+    const vndbAdapterDescriptor = SOURCE_REGISTRY.vndb;
+    const gameFaqsAdapterDescriptor = SOURCE_REGISTRY.gamefaqs;
+    const igdbAdapterDescriptor = SOURCE_REGISTRY.igdb;
     if (backloggdAdapterDescriptor.id !== 'backloggd' || backloggdAdapterDescriptor.label !== 'Backloggd' || backloggdAdapterDescriptor.sourceWebsite !== 'Backloggd') {
       throw new Error('Backloggd adapter descriptor identity fields are incorrect.');
     }
@@ -14257,6 +21588,15 @@ ${viewerScript}  </script>
     }
     if (hltbAdapterDescriptor.id !== 'howlongtobeat' || hltbAdapterDescriptor.label !== 'HowLongToBeat' || hltbAdapterDescriptor.sourceWebsite !== 'HowLongToBeat') {
       throw new Error('HowLongToBeat adapter descriptor identity fields are incorrect.');
+    }
+    if (vndbAdapterDescriptor.id !== 'vndb' || vndbAdapterDescriptor.label !== 'VNDB' || vndbAdapterDescriptor.sourceWebsite !== 'VNDB') {
+      throw new Error('VNDB adapter descriptor identity fields are incorrect.');
+    }
+    if (gameFaqsAdapterDescriptor.id !== 'gamefaqs' || gameFaqsAdapterDescriptor.label !== 'GameFAQs' || gameFaqsAdapterDescriptor.sourceWebsite !== 'GameFAQs') {
+      throw new Error('GameFAQs adapter descriptor identity fields are incorrect.');
+    }
+    if (igdbAdapterDescriptor.id !== 'igdb' || igdbAdapterDescriptor.label !== 'IGDB' || igdbAdapterDescriptor.sourceWebsite !== 'IGDB') {
+      throw new Error('IGDB adapter descriptor identity fields are incorrect.');
     }
     if (backloggdAdapterDescriptor.match.hostPattern !== 'backloggd.com' || backloggdAdapterDescriptor.export.filenameSuffix !== 'backloggd-library') {
       throw new Error('Backloggd adapter descriptor host/filename fields are incorrect.');
@@ -14267,7 +21607,62 @@ ${viewerScript}  </script>
     if (hltbAdapterDescriptor.match.hostPattern !== 'howlongtobeat.com' || hltbAdapterDescriptor.export.filenameSuffix !== 'howlongtobeat-library') {
       throw new Error('HowLongToBeat adapter descriptor host/filename fields are incorrect.');
     }
-    const expectedSharedItemFields = ['title', 'url', 'cover_url', 'status', 'statuses', 'release_date', 'genres', 'platforms', 'user_rating', 'average_rating'];
+    if (vndbAdapterDescriptor.match.hostPattern !== 'vndb.org' || vndbAdapterDescriptor.export.filenameSuffix !== 'vndb-library') {
+      throw new Error('VNDB adapter descriptor host/filename fields are incorrect.');
+    }
+    if (gameFaqsAdapterDescriptor.match.hostPattern !== 'gamefaqs.gamespot.com' || gameFaqsAdapterDescriptor.export.filenameSuffix !== 'gamefaqs-library') {
+      throw new Error('GameFAQs adapter descriptor host/filename fields are incorrect.');
+    }
+    if (igdbAdapterDescriptor.match.hostPattern !== 'igdb.com' || igdbAdapterDescriptor.export.filenameSuffix !== 'igdb-library') {
+      throw new Error('IGDB adapter descriptor host/filename fields are incorrect.');
+    }
+    const defaultHtmlOptions = resolveExportedHtmlTemplateOptions({});
+    const backloggdHtmlOptions = getExportedHtmlTemplateOptions(backloggdAdapterDescriptor.sourceWebsite);
+    const mobyGamesHtmlOptions = getExportedHtmlTemplateOptions(mobyGamesAdapterDescriptor.sourceWebsite);
+    const hltbHtmlOptions = getExportedHtmlTemplateOptions(hltbAdapterDescriptor.sourceWebsite);
+    const vndbHtmlOptions = getExportedHtmlTemplateOptions(vndbAdapterDescriptor.sourceWebsite);
+    const gameFaqsHtmlOptions = getExportedHtmlTemplateOptions(gameFaqsAdapterDescriptor.sourceWebsite);
+    const igdbHtmlOptions = getExportedHtmlTemplateOptions(igdbAdapterDescriptor.sourceWebsite);
+    if (defaultHtmlOptions.template !== DEFAULT_EXPORTED_HTML_TEMPLATE
+      || defaultHtmlOptions.allowGenreEmojis
+      || !defaultHtmlOptions.showNameSearch
+      || !defaultHtmlOptions.showGenreSearch
+      || !defaultHtmlOptions.showPlatformSearch
+      || defaultHtmlOptions.showLanguageSearch
+      || defaultHtmlOptions.genreFilterUi !== 'search'
+      || defaultHtmlOptions.genreTotalSource !== 'included'
+      || defaultHtmlOptions.platformTotalSource !== 'included'
+      || !defaultHtmlOptions.statusPillConfiguration
+      || defaultHtmlOptions.defaultLanguageColumn
+      || defaultHtmlOptions.defaultLengthColumn
+      || defaultHtmlOptions.showLanguageColumn
+      || defaultHtmlOptions.showLengthColumn) {
+      throw new Error('Standard HTML template column defaults are incorrect.');
+    }
+    if (hltbHtmlOptions.template !== DEFAULT_EXPORTED_HTML_TEMPLATE
+      || hltbHtmlOptions.allowGenreEmojis
+      || hltbHtmlOptions.genreFilterUi !== 'search'
+      || hltbHtmlOptions.genreTotalSource !== 'included'
+      || hltbHtmlOptions.platformTotalSource !== 'included') {
+      throw new Error('HowLongToBeat exported HTML options no longer inherit the standard HTML template.');
+    }
+    if (!mobyGamesHtmlOptions.showEmptyGenres
+      || !mobyGamesHtmlOptions.showEmptyPlatforms
+      || mobyGamesHtmlOptions.genreTotalSource !== 'provided'
+      || mobyGamesHtmlOptions.platformTotalSource !== 'provided'
+      || !mobyGamesHtmlOptions.defaultUserRatingColumn) {
+      throw new Error('MobyGames exported HTML overrides are incorrect.');
+    }
+    if (backloggdHtmlOptions.layout !== 'backloggd'
+      || backloggdHtmlOptions.genreFilterUi !== 'backloggd'
+      || !backloggdHtmlOptions.allowGenreEmojis
+      || backloggdHtmlOptions.showGenreSearch
+      || !backloggdHtmlOptions.showEmptyPlatforms
+      || backloggdHtmlOptions.statusPillConfiguration
+      || !backloggdHtmlOptions.defaultUserRatingColumn) {
+      throw new Error('Backloggd exported HTML overrides are incorrect.');
+    }
+    const expectedSharedItemFields = ['title', 'url', 'cover_url', 'status', 'statuses', 'release_date', 'languages', 'length', 'genres', 'platforms', 'user_rating', 'average_rating'];
     if (!expectedSharedItemFields.every(field => backloggdAdapterDescriptor.fields.sharedItemFields.includes(field))) {
       throw new Error('Backloggd adapter descriptor is missing shared item fields.');
     }
@@ -14277,6 +21672,39 @@ ${viewerScript}  </script>
     if (!expectedSharedItemFields.every(field => hltbAdapterDescriptor.fields.sharedItemFields.includes(field))) {
       throw new Error('HowLongToBeat adapter descriptor is missing shared item fields.');
     }
+    if (!expectedSharedItemFields.every(field => vndbAdapterDescriptor.fields.sharedItemFields.includes(field))) {
+      throw new Error('VNDB adapter descriptor is missing shared item fields.');
+    }
+    if (!expectedSharedItemFields.every(field => gameFaqsAdapterDescriptor.fields.sharedItemFields.includes(field))) {
+      throw new Error('GameFAQs adapter descriptor is missing shared item fields.');
+    }
+    if (!expectedSharedItemFields.every(field => igdbAdapterDescriptor.fields.sharedItemFields.includes(field))) {
+      throw new Error('IGDB adapter descriptor is missing shared item fields.');
+    }
+    if (gameFaqsHtmlOptions.template !== DEFAULT_EXPORTED_HTML_TEMPLATE
+      || gameFaqsHtmlOptions.allowGenreEmojis
+      || !gameFaqsHtmlOptions.showEmptyPlatforms
+      || gameFaqsHtmlOptions.platformTotalSource !== 'provided'
+      || !gameFaqsHtmlOptions.showLengthColumn
+      || !gameFaqsHtmlOptions.defaultLengthColumn
+      || gameFaqsHtmlOptions.showLanguageColumn) {
+      throw new Error('GameFAQs exported HTML options are incorrect.');
+    }
+    if (igdbHtmlOptions.template !== DEFAULT_EXPORTED_HTML_TEMPLATE || !igdbHtmlOptions.statusPillConfiguration) {
+      throw new Error('IGDB exported HTML options are incorrect.');
+    }
+    if (!vndbHtmlOptions.showLanguageColumn
+      || !vndbHtmlOptions.defaultLanguageColumn
+      || vndbHtmlOptions.showLengthColumn
+      || vndbHtmlOptions.defaultLengthColumn
+      || !vndbHtmlOptions.showLanguageSearch) {
+      throw new Error('VNDB language column options are incorrect.');
+    }
+    if (!hltbHtmlOptions.showLengthColumn
+      || !hltbHtmlOptions.defaultLengthColumn
+      || hltbHtmlOptions.showLanguageColumn) {
+      throw new Error('HowLongToBeat length column options are incorrect.');
+    }
     const expectedMobyGamesSourceMetaFields = ['collection', 'collections', 'collection_url', 'collection_urls', 'gameplay', 'release_year', 'full_release_date', 'status_ids', 'status_color'];
     if (!expectedMobyGamesSourceMetaFields.every(field => mobyGamesAdapterDescriptor.fields.sourceMetaFields.includes(field))) {
       throw new Error('MobyGames adapter descriptor is missing source_meta fields.');
@@ -14285,11 +21713,27 @@ ${viewerScript}  </script>
     if (!expectedHowLongToBeatSourceMetaFields.every(field => hltbAdapterDescriptor.fields.sourceMetaFields.includes(field))) {
       throw new Error('HowLongToBeat adapter descriptor is missing source_meta fields.');
     }
-    const expectedBackloggdSourceMetaFields = ['game_id', 'play_type'];
+    const expectedBackloggdSourceMetaFields = ['game_id', 'play_type', 'list', 'lists', 'list_url', 'list_urls', 'lengths'];
     if (!expectedBackloggdSourceMetaFields.every(field => backloggdAdapterDescriptor.fields.sourceMetaFields.includes(field))) {
       throw new Error('Backloggd adapter descriptor is missing source_meta fields.');
     }
-    if (backloggdAdapterDescriptor.ui.hasStatusConfiguration || !backloggdAdapterDescriptor.ui.platformOptions || backloggdAdapterDescriptor.ui.metadataLabel !== 'Genres') {
+    const expectedGameFaqsSourceMetaFields = [
+      'developer', 'publisher', 'description', 'date_published',
+      'user_rating_count', 'average_length_hours', 'length_rating_count',
+      'average_difficulty', 'difficulty_rating_count', 'difficulty_label',
+      'age_rating', 'age_rating_description', 'metacritic_score',
+      'metacritic_review_count', 'metacritic_url',
+    ];
+    if (!expectedGameFaqsSourceMetaFields.every(field => gameFaqsAdapterDescriptor.fields.sourceMetaFields.includes(field))) {
+      throw new Error('GameFAQs adapter descriptor is missing advanced source_meta fields.');
+    }
+    const expectedIgdbSourceMetaFields = [
+      'platform_releases', 'igdb_genres', 'igdb_themes', 'rating_count_label',
+    ];
+    if (!expectedIgdbSourceMetaFields.every(field => igdbAdapterDescriptor.fields.sourceMetaFields.includes(field))) {
+      throw new Error('IGDB adapter descriptor is missing advanced source_meta fields.');
+    }
+    if (!backloggdAdapterDescriptor.ui.hasStatusConfiguration || !backloggdAdapterDescriptor.ui.platformOptions || backloggdAdapterDescriptor.ui.metadataLabel !== 'Genres') {
       throw new Error('Backloggd UI descriptor fields are incorrect.');
     }
     if (!mobyGamesAdapterDescriptor.ui.hasStatusConfiguration || mobyGamesAdapterDescriptor.ui.platformOptions || mobyGamesAdapterDescriptor.ui.metadataLabel !== 'Advanced') {
@@ -14298,11 +21742,59 @@ ${viewerScript}  </script>
     if (!hltbAdapterDescriptor.ui.hasStatusConfiguration || hltbAdapterDescriptor.ui.platformOptions || hltbAdapterDescriptor.ui.metadataLabel !== 'Advanced') {
       throw new Error('HowLongToBeat UI descriptor fields are incorrect.');
     }
+    if (!vndbAdapterDescriptor.ui.hasStatusConfiguration || vndbAdapterDescriptor.ui.platformOptions || vndbAdapterDescriptor.ui.metadataOption === false || vndbAdapterDescriptor.ui.metadataLabel !== 'Tags') {
+      throw new Error('VNDB UI descriptor fields are incorrect.');
+    }
+    if (!gameFaqsAdapterDescriptor.ui.hasStatusConfiguration
+      || gameFaqsAdapterDescriptor.ui.platformOptions
+      || gameFaqsAdapterDescriptor.ui.metadataOption === false
+      || gameFaqsAdapterDescriptor.ui.metadataLabel !== 'Advanced') {
+      throw new Error('GameFAQs UI descriptor fields are incorrect.');
+    }
+    if (!igdbAdapterDescriptor.ui.hasStatusConfiguration
+      || igdbAdapterDescriptor.ui.platformOptions
+      || igdbAdapterDescriptor.ui.metadataOption === false
+      || igdbAdapterDescriptor.ui.metadataLabel !== 'Advanced') {
+      throw new Error('IGDB UI descriptor fields are incorrect.');
+    }
+    if (!Array.isArray(gameFaqsAdapterDescriptor.ui.targetOptions)
+      || gameFaqsAdapterDescriptor.ui.targetOptions.length !== 2
+      || !Array.isArray(backloggdAdapterDescriptor.ui.targetOptions)
+      || backloggdAdapterDescriptor.ui.targetOptions.length !== 2
+      || mobyGamesAdapterDescriptor.ui.targetOptions
+      || !Array.isArray(hltbAdapterDescriptor.ui.targetOptions)
+      || hltbAdapterDescriptor.ui.targetOptions.length !== 2
+      || vndbAdapterDescriptor.ui.targetOptions
+      || !Array.isArray(igdbAdapterDescriptor.ui.targetOptions)
+      || igdbAdapterDescriptor.ui.targetOptions.length !== 2) {
+      throw new Error('Source target option descriptors are incorrect.');
+    }
     if (!mobyGamesAdapterDescriptor.statusConfig || mobyGamesAdapterDescriptor.statusConfig.storageKey !== STATUS_PILL_CONFIG_STORAGE_KEY) {
       throw new Error('MobyGames statusConfig descriptor is not configured.');
     }
+    if (!backloggdAdapterDescriptor.statusConfig || backloggdAdapterDescriptor.statusConfig.storageKey !== BACKLOGGD_STATUS_PILL_CONFIG_STORAGE_KEY) {
+      throw new Error('Backloggd statusConfig descriptor is not configured.');
+    }
+    if (getSourceStatusConfigDescriptorForHost('mobygames.com').loadAllCounts !== null) {
+      throw new Error('MobyGames Load All Counts should remain disabled until a site-specific loader is configured.');
+    }
     if (!hltbAdapterDescriptor.statusConfig || hltbAdapterDescriptor.statusConfig.storageKey !== HLTB_STATUS_PILL_CONFIG_STORAGE_KEY) {
       throw new Error('HowLongToBeat statusConfig descriptor is not configured.');
+    }
+    if (!vndbAdapterDescriptor.statusConfig || vndbAdapterDescriptor.statusConfig.storageKey !== VNDB_STATUS_PILL_CONFIG_STORAGE_KEY) {
+      throw new Error('VNDB statusConfig descriptor is not configured.');
+    }
+    if (!gameFaqsAdapterDescriptor.statusConfig || gameFaqsAdapterDescriptor.statusConfig.storageKey !== GAMEFAQS_STATUS_PILL_CONFIG_STORAGE_KEY) {
+      throw new Error('GameFAQs statusConfig descriptor is not configured.');
+    }
+    if (!igdbAdapterDescriptor.statusConfig || igdbAdapterDescriptor.statusConfig.storageKey !== IGDB_STATUS_PILL_CONFIG_STORAGE_KEY) {
+      throw new Error('IGDB statusConfig descriptor is not configured.');
+    }
+    if (gameFaqsAdapterDescriptor.statusConfig.discoverCollections !== fetchGameFaqsTargetCollections) {
+      throw new Error('GameFAQs statusConfig descriptor is not mapped to target-aware live list counts.');
+    }
+    if (hltbAdapterDescriptor.statusConfig.loadAllCounts !== runHowLongToBeatStatusConfigurationPreflight) {
+      throw new Error('HowLongToBeat Load All Counts is not mapped to its site-specific loader.');
     }
     const hltbOfflineCoverOptions = getSourceOfflineCoverOptions('howlongtobeat');
     if (!hltbAdapterDescriptor.media || !hltbAdapterDescriptor.media.offlineCovers || !hltbAdapterDescriptor.media.offlineCovers.enabled) {
@@ -14375,57 +21867,23 @@ ${viewerScript}  </script>
   }
 
   function buildExporterTestHooks() {
-    return {
-      parsers: {
-        parseMobyGamesOverviewPage,
-        parseMobyGamesOverviewDocument,
-        parseMobyGamesCollectionGamesPage,
-        parseHowLongToBeatCategoriesDocument,
-        parseHowLongToBeatGamesDocument,
-        extractHowLongToBeatGamePageDetails,
-        parseHowLongToBeatGamePage,
-      },
-      payload: {
-        mergeMobyGamesItemsForExport,
-        mergeHowLongToBeatItemsForExport,
-        normalizeSharedExportItem,
-        normalizeSharedExportPayload,
-        buildCanonicalSharedExportItem,
-        buildCanonicalSharedExportPayload,
-        buildSharedJson,
-        normalizeMobyGamesSharedExportItem,
-        normalizeHowLongToBeatSharedExportItem,
-        buildBackloggdPayloadFromRows,
-        buildCanonicalMobyGamesJsonItem,
-      },
-      descriptors: {
-        sources: SOURCE_REGISTRY,
-        getSourceDescriptorForHost,
-        getSourceUiDescriptorForHost,
-        getSourceStatusConfigDescriptorForHost,
-        getSourceOfflineCoverOptions,
-        getSourceFormatDescriptor,
-        getSourceRuntimeDescriptorForHost,
-      },
-      builders: {
-        buildMobyGamesCsv,
-        buildMobyGamesJson,
-        buildMobyGamesHtml,
-        buildHowLongToBeatCsv,
-        buildHowLongToBeatJson,
-        buildHowLongToBeatHtml,
-      },
-      diagnostics: {
-        runExporterDiagnostics,
-        checkGroups: EXPORTER_DIAGNOSTIC_CHECK_GROUPS,
-      },
+    const parsers = {
       parseMobyGamesOverviewPage,
       parseMobyGamesOverviewDocument,
       parseMobyGamesCollectionGamesPage,
       parseHowLongToBeatCategoriesDocument,
       parseHowLongToBeatGamesDocument,
+      parseHowLongToBeatCollectionGamesDocument,
       extractHowLongToBeatGamePageDetails,
       parseHowLongToBeatGamePage,
+      parseGameFaqsListDocument,
+      parseGameFaqsCustomListsDocument,
+      parseIgdbListDocument,
+      parseBackloggdListIndexDocument,
+      parseBackloggdListDetailDocument,
+      parseBackloggdGamePageAdvancedDocument,
+    };
+    const payload = {
       mergeMobyGamesItemsForExport,
       mergeHowLongToBeatItemsForExport,
       normalizeSharedExportItem,
@@ -14435,22 +21893,72 @@ ${viewerScript}  </script>
       buildSharedJson,
       normalizeMobyGamesSharedExportItem,
       normalizeHowLongToBeatSharedExportItem,
+      normalizeGameFaqsSharedExportItem,
+      normalizeIgdbSharedExportItem,
+      applyIgdbGamePageMetadata,
+      mergeGameFaqsItemsForExport,
+      buildGameFaqsPayload,
+      buildIgdbPayload,
       buildBackloggdPayloadFromRows,
       buildCanonicalMobyGamesJsonItem,
-      sourceRegistry: SOURCE_REGISTRY,
+    };
+    const descriptors = {
+      sources: SOURCE_REGISTRY,
       getSourceDescriptorForHost,
       getSourceUiDescriptorForHost,
       getSourceStatusConfigDescriptorForHost,
       getSourceOfflineCoverOptions,
+      getExportedHtmlTemplateOptions,
       getSourceFormatDescriptor,
       getSourceRuntimeDescriptorForHost,
+    };
+    const builders = {
       buildMobyGamesCsv,
       buildMobyGamesJson,
       buildMobyGamesHtml,
       buildHowLongToBeatCsv,
       buildHowLongToBeatJson,
       buildHowLongToBeatHtml,
+      buildGameFaqsCsv,
+      buildGameFaqsJson,
+      buildGameFaqsHtml,
+      buildIgdbCsv,
+      buildIgdbJson,
+      buildIgdbHtml,
+    };
+    const diagnostics = {
       runExporterDiagnostics,
+      checkGroups: EXPORTER_DIAGNOSTIC_CHECK_GROUPS,
+    };
+    const statusConfiguration = {
+      resetToDefault: resetStatusPillConfigToDefault,
+      rememberCollectionCounts: rememberLoadedSourceCollectionCounts,
+      getConfig: () => cloneStatusPillConfig(statusPillConfig),
+    };
+    const targetRouting = {
+      isIgdbListsTarget,
+      isHowLongToBeatCollectionsTarget,
+      getHowLongToBeatConfiguredCategoryMappings,
+    };
+    const downloads = {
+      claimFilename: claimDownloadFilename,
+      reset: () => downloadedFilenamesThisSession.clear(),
+    };
+    return {
+      parsers,
+      payload,
+      descriptors,
+      builders,
+      diagnostics,
+      statusConfiguration,
+      targetRouting,
+      downloads,
+      ...parsers,
+      ...payload,
+      sourceRegistry: descriptors.sources,
+      ...Object.fromEntries(Object.entries(descriptors).filter(([key]) => key !== 'sources')),
+      ...builders,
+      runExporterDiagnostics: diagnostics.runExporterDiagnostics,
     };
   }
 
@@ -14462,6 +21970,12 @@ ${viewerScript}  </script>
   if (diagnosticsBtn) diagnosticsBtn.addEventListener('click', runExporterDiagnosticsFromButton);
   const sourceUi = getSourceUiDescriptorForHost();
   const sourceRuntime = getSourceRuntimeDescriptorForHost();
+  if (isIgdbHost() && isIgdbListsTarget()) {
+    prefetchIgdbListCollections();
+  }
+  if (isHowLongToBeatHost() && isHowLongToBeatCollectionsTarget()) {
+    prefetchHowLongToBeatListCollections();
+  }
   if (sourceUi.hasStatusConfiguration && configBtn) configBtn.addEventListener('click', () => {
     if (exportInProgress) {
       flashMobyGamesConfigDisabled();
@@ -14474,15 +21988,9 @@ ${viewerScript}  </script>
     if (sourceRuntime.clearExportState) sourceRuntime.clearExportState();
     requestExportCancel();
   });
-  if (sourceRuntime.resumeExport) {
-    setTimeout(() => {
-      flushPendingNavMessage();
-      sourceRuntime.resumeExport();
-    }, 0);
-  } else {
-    setTimeout(() => {
-      flushPendingNavMessage();
-    }, 0);
-  }
+  setTimeout(() => {
+    flushPendingNavMessage();
+    if (sourceRuntime.resumeExport) sourceRuntime.resumeExport();
+  }, 0);
   } // end initPanel()
 })();
