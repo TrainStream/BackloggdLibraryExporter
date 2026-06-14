@@ -31,7 +31,7 @@ The more tags you choose for exporting, the longer is gonna take.<br>
 - Column picker lets users show or hide covers, links, genres, emoji, platforms, status, languages, length, ratings, and release dates.
 
 Exporting Menu:<br>
-<img width="358" height="227" alt="Export Menu" src="https://github.com/user-attachments/assets/26c9edd5-3c7f-4baf-89b3-e738c485378f" />
+<img width="358" height="227" alt="ExportMenu" src="https://github.com/user-attachments/assets/48d673c3-deab-4580-85e4-6c61d05a464a" />
 <br>
 Exported html:<br>
 <img width="1460" height="1191" alt="HTML" src="https://github.com/user-attachments/assets/542053e5-0fa1-48a5-a534-ef7f06379b0e" />
